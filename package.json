@@ -1,0 +1,51 @@
+{
+  "name": "sinwan-compiler",
+  "version": "0.1.0",
+  "description": "Shared compiler core for Sinwan plugins",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "keywords": [
+    "sinwan",
+    "compiler",
+    "jsx",
+    "reactive",
+    "signals"
+  ],
+  "author": "Mohammed Ben Cheikh",
+  "license": "MIT",
+  "bugs": "https://github.com/sinwanjs/sinwan/issues",
+  "homepage": "https://sinwanjs.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sinwanjs/sinwan",
+    "directory": "packages/sinwan-compiler"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md"
+  ],
+  "bin": {
+    "sinwan": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "bun run build.ts"
+  },
+  "devDependencies": {
+    "@types/babel__generator": "^7.27.0",
+    "@types/babel__traverse": "^7.28.0",
+    "@types/bun": "latest"
+  },
+  "dependencies": {
+    "@babel/core": "^7.24.0",
+    "@babel/generator": "^7.24.0",
+    "@babel/parser": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "@babel/types": "^7.24.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
