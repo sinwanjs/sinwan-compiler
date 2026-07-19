@@ -1,6 +1,6 @@
 {
   "name": "sinwan-compiler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared compiler core for Sinwan plugins",
   "type": "module",
   "main": "./dist/index.js",
@@ -30,7 +30,11 @@
     "sinwan": "./dist/cli.js"
   },
   "scripts": {
-    "build": "bun run build.ts"
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "bun run build.ts",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "bun run clean && bun run typecheck && bun run test && bun run build"
   },
   "devDependencies": {
     "@types/babel__generator": "^7.27.0",

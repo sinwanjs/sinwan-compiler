@@ -49,6 +49,36 @@ const COMPONENT_FACTORY_MODULES: Record<string, Set<string>> = {
   "sinwan/component": new Set(["cc"]),
 };
 
+// ─── Built-in component reactive prop registry ─────────────
+
+interface BuiltinComponentEntry {
+  readonly reactiveProps: ReadonlySet<string>;
+}
+
+const BUILTIN_REACTIVE_PROPS: ReadonlyMap<string, BuiltinComponentEntry> =
+  new Map([
+    ["For", { reactiveProps: new Set(["each"]) }],
+    ["Show", { reactiveProps: new Set(["when"]) }],
+    ["Switch", { reactiveProps: new Set(["when"]) }],
+    ["Match", { reactiveProps: new Set(["when"]) }],
+    ["Index", { reactiveProps: new Set(["each"]) }],
+    ["Key", { reactiveProps: new Set(["when"]) }],
+    ["Dynamic", { reactiveProps: new Set(["component"]) }],
+    ["Visible", { reactiveProps: new Set(["when", "style"]) }],
+    ["Portal", { reactiveProps: new Set(["mount"]) }],
+    ["Virtual", { reactiveProps: new Set(["each"]) }],
+    ["Activity", { reactiveProps: new Set(["mode"]) }],
+  ]);
+
+function isBuiltinReactiveProp(
+  componentName: string,
+  attrName: string,
+): boolean {
+  const entry = BUILTIN_REACTIVE_PROPS.get(componentName);
+  if (!entry) return false;
+  return entry.reactiveProps.has(attrName);
+}
+
 export function trackReactiveImports(ast: t.Node): ImportNames {
   const names: ImportNames = {
     createMutable: new Set(),
@@ -521,12 +551,26 @@ function containsReactiveRead(
 
 // ─── Wrap JSX expressions ──────────────────────────────────
 
-function isComponentExpression(exprPath: any): boolean {
+export interface ComponentExpressionInfo {
+  isComponent: boolean;
+  componentName: string | null;
+  attributeName: string | null;
+}
+
+function getComponentExpressionInfo(exprPath: any): ComponentExpressionInfo {
   const parent = exprPath.parentPath;
-  if (!parent) return false;
+  if (!parent) {
+    return { isComponent: false, componentName: null, attributeName: null };
+  }
 
   let elementPath: any = null;
+  let attributeName: string | null = null;
+
   if (parent.isJSXAttribute && parent.isJSXAttribute()) {
+    const attrName = parent.node.name;
+    if (t.isJSXIdentifier(attrName)) {
+      attributeName = attrName.name;
+    }
     const openingElementPath = parent.parentPath;
     elementPath = openingElementPath?.parentPath;
   } else if (parent.isJSXElement && parent.isJSXElement()) {
@@ -538,12 +582,14 @@ function isComponentExpression(exprPath: any): boolean {
     !elementPath.isJSXElement ||
     !elementPath.isJSXElement()
   ) {
-    return false;
+    return { isComponent: false, componentName: null, attributeName: null };
   }
 
   const name = elementPath.node.openingElement.name;
   let firstChar: string | null = null;
+  let componentName: string | null = null;
   if (t.isJSXIdentifier(name)) {
+    componentName = name.name;
     firstChar = name.name?.[0] ?? null;
   } else if (t.isJSXMemberExpression(name)) {
     let current: t.JSXMemberExpression | t.JSXIdentifier = name;
@@ -551,12 +597,40 @@ function isComponentExpression(exprPath: any): boolean {
       current = current.object;
     }
     if (t.isJSXIdentifier(current)) {
+      componentName = current.name;
       firstChar = current.name?.[0] ?? null;
     }
   }
 
-  if (!firstChar) return false;
-  return firstChar === firstChar.toUpperCase() && /[A-Z]/.test(firstChar);
+  if (
+    !firstChar ||
+    firstChar !== firstChar.toUpperCase() ||
+    !/[A-Z]/.test(firstChar)
+  ) {
+    return { isComponent: false, componentName: null, attributeName: null };
+  }
+
+  return { isComponent: true, componentName, attributeName };
+}
+
+function isReactiveComponentProp(
+  info: ComponentExpressionInfo,
+  componentNames: Map<string, t.Function>,
+  reactiveProps: Map<t.Function, Set<string>>,
+): boolean {
+  if (!info.isComponent || !info.componentName || !info.attributeName) {
+    return false;
+  }
+
+  if (isBuiltinReactiveProp(info.componentName, info.attributeName)) {
+    return true;
+  }
+
+  const componentFn = componentNames.get(info.componentName);
+  if (!componentFn) return false;
+  const props = reactiveProps.get(componentFn);
+  if (!props) return false;
+  return props.has(info.attributeName);
 }
 
 function shouldWrap(expr: t.Expression, scope: ReactiveScope): boolean {
@@ -971,9 +1045,14 @@ export function wrapReactiveExpressions(
       path.traverse({
         JSXExpressionContainer(exprPath: any) {
           const expr = exprPath.node.expression as t.Expression;
-          // Component props/children should be passed as plain values, not
-          // wrapped in getters/descriptors.
-          if (isComponentExpression(exprPath)) return;
+          const compInfo = getComponentExpressionInfo(exprPath);
+          if (compInfo.isComponent) {
+            if (
+              !isReactiveComponentProp(compInfo, componentNames, reactiveProps)
+            ) {
+              return;
+            }
+          }
           if (shouldWrap(expr, scope)) {
             exprPath.replaceWith(
               t.jsxExpressionContainer(

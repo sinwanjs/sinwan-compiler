@@ -36,4 +36,5 @@ export {
   type Binding,
   type CallSite,
   type ImportNames,
+  type ComponentExpressionInfo,
 } from "./reactive-wrap";

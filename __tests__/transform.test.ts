@@ -835,3 +835,238 @@ describe("transformJSX", () => {
     expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
   });
 });
+
+describe("reactive component prop wrapping", () => {
+  describe("built-in components", () => {
+    it("wraps For each with reactive useState getter", () => {
+      const code = `
+        import { useState } from "sinwan/react-client";
+        const App = () => {
+          const [count, setCount] = useState(0);
+          return <For each={Array.from({ length: count() }, (_, i) => i)}>{(item) => <div>{item}</div>}</For>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("each={() => Array.from");
+    });
+
+    it("does NOT wrap For each with static array", () => {
+      const code = `
+        const App = () => {
+          return <For each={[1, 2, 3]}>{(item) => <div>{item}</div>}</For>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).not.toContain("each={() =>");
+    });
+
+    it("wraps Show when with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const visible = signal(true);
+          return <Show when={visible.value}>content</Show>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("when={() => visible.value");
+    });
+
+    it("does NOT wrap Show when with static boolean", () => {
+      const code = `
+        const App = () => {
+          return <Show when={true}>content</Show>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).not.toContain("when={() =>");
+    });
+
+    it("wraps Switch when with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const mode = signal("on");
+          return <Switch when={mode.value}>content</Switch>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("when={() => mode.value");
+    });
+
+    it("wraps Match when with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const active = signal(true);
+          return <Match when={active.value}>content</Match>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("when={() => active.value");
+    });
+
+    it("wraps Index each with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const items = signal([1, 2, 3]);
+          return <Index each={items.value}>{(item) => <div>{item()}</div>}</Index>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("each={() => items.value");
+    });
+
+    it("wraps Key when with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const key = signal("abc");
+          return <Key when={key.value}>content</Key>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("when={() => key.value");
+    });
+
+    it("wraps Dynamic component with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const tag = signal("div");
+          return <Dynamic component={tag.value}>content</Dynamic>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("component={() => tag.value");
+    });
+
+    it("wraps Visible when with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const show = signal(true);
+          return <Visible when={show.value}>content</Visible>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("when={() => show.value");
+    });
+
+    it("wraps Portal mount with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const target = signal(document.body);
+          return <Portal mount={target.value}>content</Portal>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("mount={() => target.value");
+    });
+
+    it("wraps Virtual each with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const items = signal([1, 2, 3]);
+          return <Virtual each={items.value} itemHeight={30} containerHeight={300}>{(item) => <div>{item}</div>}</Virtual>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("each={() => items.value");
+    });
+
+    it("wraps Activity mode with reactive signal", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const mode = signal("visible");
+          return <Activity mode={mode.value}>content</Activity>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("mode={() => mode.value");
+    });
+
+    it("does NOT wrap non-reactive prop on built-in (For fallback)", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const items = signal([1, 2, 3]);
+          return <For each={items.value} fallback={<div>empty</div>}>{(item) => <div>{item}</div>}</For>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).not.toContain("fallback={() =>");
+    });
+
+    it("does NOT wrap Suspense fallback (not in registry)", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const loading = signal(true);
+          return <Suspense fallback={loading.value}>content</Suspense>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).not.toContain("fallback={() =>");
+    });
+  });
+
+  describe("user cc() components", () => {
+    it("wraps reactive prop on user component via call graph analysis", () => {
+      const code = `
+        import { cc } from "sinwan/component";
+        import { useState } from "sinwan/react-client";
+
+        const Child = cc(({ label }) => {
+          return <p>{label}</p>;
+        });
+
+        const Parent = () => {
+          const [count, setCount] = useState(0);
+          return <Child label={count()} />;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("label={() => count()}");
+    });
+
+    it("does NOT wrap static prop on user component", () => {
+      const code = `
+        import { cc } from "sinwan/component";
+
+        const Child = cc(({ label }) => {
+          return <p>{label}</p>;
+        });
+
+        const Parent = () => {
+          return <Child label="hello" />;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).not.toContain("label={() =>");
+    });
+
+    it("does NOT wrap non-reactive prop on user component", () => {
+      const code = `
+        import { cc } from "sinwan/component";
+        import { useState } from "sinwan/react-client";
+
+        const Child = cc(({ label, staticProp }) => {
+          return <p>{label}</p>;
+        });
+
+        const Parent = () => {
+          const [count, setCount] = useState(0);
+          return <Child label={count()} staticProp="fixed" />;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("label={() => count()}");
+      expect(result.code).not.toContain("staticProp={() =>");
+    });
+  });
+});
