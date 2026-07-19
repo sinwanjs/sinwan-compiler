@@ -15,12 +15,11 @@
   ],
   "author": "Mohammed Ben Cheikh",
   "license": "MIT",
-  "bugs": "https://github.com/sinwanjs/sinwan/issues",
+  "bugs": "https://github.com/sinwanjs/sinwan-compiler/issues",
   "homepage": "https://sinwanjs.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sinwanjs/sinwan",
-    "directory": "packages/sinwan-compiler"
+    "url": "https://github.com/sinwanjs/sinwan-compiler.git"
   },
   "files": [
     "dist",
