@@ -19,7 +19,7 @@
   "homepage": "https://sinwanjs.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sinwanjs/sinwan-compiler.git"
+    "url": "https://github.com/sinwanjs/sinwan-compiler"
   },
   "files": [
     "dist",
