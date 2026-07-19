@@ -41,6 +41,7 @@ export interface ImportNames {
 const REACTIVE_SOURCE_MODULES: Record<string, Set<string>> = {
   "sinwan/store": new Set(["createMutable", "createStore"]),
   "sinwan/reactivity": new Set(["signal", "computed"]),
+  "sinwan/react": new Set(["useState"]),
   "sinwan/react-client": new Set(["useState"]),
 };
 

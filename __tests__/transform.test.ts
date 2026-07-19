@@ -1068,5 +1068,17 @@ describe("reactive component prop wrapping", () => {
       expect(result.code).toContain("label={() => count()}");
       expect(result.code).not.toContain("staticProp={() =>");
     });
+
+    it("tracks useState from sinwan/react import path", () => {
+      const code = `
+        import { useState } from "sinwan/react";
+        const App = () => {
+          const [arr, setArr] = useState<number[]>([]);
+          return <div>{arr().length}</div>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("() => arr().length");
+    });
   });
 });
