@@ -119,7 +119,7 @@ describe("transformJSX", () => {
 
   it("wraps useState getter calls in JSX children", () => {
     const code = `
-      import { useState } from "sinwan/react-client";
+      import { useState } from "sinwan/react";
       const App = () => {
         const [count] = useState(0);
         return <p>{count()}</p>;
@@ -171,7 +171,7 @@ describe("transformJSX", () => {
 
   it("wraps calls to local functions that read reactive state", () => {
     const code = `
-      import { useState } from "sinwan/react-client";
+      import { useState } from "sinwan/react";
       const App = () => {
         const [tasks] = useState([{ status: "Done" }]);
         const getStats = () => tasks().filter(t => t.status === "Done").length;
@@ -840,7 +840,7 @@ describe("reactive component prop wrapping", () => {
   describe("built-in components", () => {
     it("wraps For each with reactive useState getter", () => {
       const code = `
-        import { useState } from "sinwan/react-client";
+        import { useState } from "sinwan/react";
         const App = () => {
           const [count, setCount] = useState(0);
           return <For each={Array.from({ length: count() }, (_, i) => i)}>{(item) => <div>{item}</div>}</For>;
@@ -1019,7 +1019,7 @@ describe("reactive component prop wrapping", () => {
     it("wraps reactive prop on user component via call graph analysis", () => {
       const code = `
         import { cc } from "sinwan/component";
-        import { useState } from "sinwan/react-client";
+        import { useState } from "sinwan/react";
 
         const Child = cc(({ label }) => {
           return <p>{label}</p>;
@@ -1053,7 +1053,7 @@ describe("reactive component prop wrapping", () => {
     it("does NOT wrap non-reactive prop on user component", () => {
       const code = `
         import { cc } from "sinwan/component";
-        import { useState } from "sinwan/react-client";
+        import { useState } from "sinwan/react";
 
         const Child = cc(({ label, staticProp }) => {
           return <p>{label}</p>;
