@@ -273,8 +273,23 @@ function elementToHtml(
   html += isVoid ? " />" : ">";
   if (isVoid) return html;
 
-  let childIndex = 0;
-  for (const child of node.children) {
+  const childResult = childrenToHtml(node.children, slots, path, filename, 0);
+  html += childResult.html;
+
+  html += `</${tagName}>`;
+  return html;
+}
+
+function childrenToHtml(
+  children: any[],
+  slots: TemplateSlot[],
+  path: number[],
+  filename: string,
+  startIndex: number,
+): { html: string; childIndex: number } {
+  let html = "";
+  let childIndex = startIndex;
+  for (const child of children) {
     if (child.type === "JSXText") {
       const text = cleanJSXText(child.value ?? "");
       if (text) {
@@ -294,11 +309,19 @@ function elementToHtml(
     } else if (child.type === "JSXElement") {
       html += elementToHtml(child, slots, [...path, childIndex], filename);
       childIndex++;
+    } else if (child.type === "JSXFragment") {
+      const fragResult = childrenToHtml(
+        child.children,
+        slots,
+        path,
+        filename,
+        childIndex,
+      );
+      html += fragResult.html;
+      childIndex = fragResult.childIndex;
     }
   }
-
-  html += `</${tagName}>`;
-  return html;
+  return { html, childIndex };
 }
 
 function jsxNameToString(name: any): string {

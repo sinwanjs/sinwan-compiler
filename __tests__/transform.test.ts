@@ -1082,3 +1082,134 @@ describe("reactive component prop wrapping", () => {
     });
   });
 });
+
+describe("template slot path generation", () => {
+  it("generates correct slot paths when reactive child precedes attr slot on sibling", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const val = signal("hello");
+        const cls = signal("active");
+        return (
+          <div>
+            <span>{val.value}</span>
+            <button class={cls.value}>btn</button>
+          </div>
+        );
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("path: [0, 0]");
+    expect(result.code).toContain("path: [1]");
+  });
+
+  it("generates correct slot paths with multiple reactive children in same parent", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const a = signal("A");
+        const b = signal("B");
+        const c = signal("C");
+        return (
+          <p>
+            <span>{a.value}</span>
+            <span>{b.value}</span>
+            <span>{c.value}</span>
+          </p>
+        );
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("path: [0, 0]");
+    expect(result.code).toContain("path: [1, 0]");
+    expect(result.code).toContain("path: [2, 0]");
+  });
+
+  it("handles JSXFragment children without dropping them", () => {
+    const code = `
+      const App = () => {
+        return (
+          <div>
+            <p>before</p>
+            <>
+              <span>frag1</span>
+              <span>frag2</span>
+            </>
+            <p>after</p>
+          </div>
+        );
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("frag1");
+    expect(result.code).toContain("frag2");
+    expect(result.code).toContain("after");
+  });
+
+  it("generates correct slot paths for reactive children inside JSXFragment", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const a = signal("A");
+        const b = signal("B");
+        return (
+          <div>
+            <p>before</p>
+            <>
+              <span>{a.value}</span>
+              <span>{b.value}</span>
+            </>
+            <p>after</p>
+          </div>
+        );
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("path: [1, 0]");
+    expect(result.code).toContain("path: [2, 0]");
+    expect(result.code).toContain("after");
+  });
+
+  it("handles nested JSXFragments", () => {
+    const code = `
+      const App = () => {
+        return (
+          <div>
+            <>
+              <span>outer</span>
+              <>
+                <span>inner</span>
+              </>
+            </>
+            <p>end</p>
+          </div>
+        );
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("outer");
+    expect(result.code).toContain("inner");
+    expect(result.code).toContain("end");
+  });
+
+  it("generates correct slot paths with attr and event on same element after reactive sibling", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const val = signal("x");
+        const cls = signal("btn");
+        return (
+          <div>
+            {val.value}
+            <button class={cls.value} onclick={() => {}}>click</button>
+          </div>
+        );
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("path: [0]");
+    expect(result.code).toContain("path: [1]");
+    expect(result.code).toContain('name: "class"');
+    expect(result.code).toContain('name: "onclick"');
+  });
+});
