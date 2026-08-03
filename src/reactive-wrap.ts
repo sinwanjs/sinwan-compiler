@@ -8,7 +8,7 @@
  * Supported reactive sources:
  *   - `createMutable` / `createStore` from `sinwan/store`
  *   - `signal` / `computed` from `sinwan/reactivity`
- *   - `useState` from `sinwan/react-client`
+ *   - `useState` from `sinwan/react`
  *
  * Example:
  *   <p>{state.name}</p>        → <p>{() => state.name}</p>
@@ -35,6 +35,7 @@ export interface ImportNames {
   signal: Set<string>;
   computed: Set<string>;
   useState: Set<string>;
+  useFetch: Set<string>;
   cc: Set<string>;
 }
 
@@ -42,6 +43,7 @@ const REACTIVE_SOURCE_MODULES: Record<string, Set<string>> = {
   "sinwan/store": new Set(["createMutable", "createStore"]),
   "sinwan/reactivity": new Set(["signal", "computed"]),
   "sinwan/react": new Set(["useState"]),
+  "sinwan/hook": new Set(["useFetch"]),
 };
 
 const COMPONENT_FACTORY_MODULES: Record<string, Set<string>> = {
@@ -79,6 +81,18 @@ function isBuiltinReactiveProp(
   return entry.reactiveProps.has(attrName);
 }
 
+/**
+ * Whether a JSX element name refers to a built-in control-flow component
+ * (Show, For, Switch, ...). Direct reactive expression children of these are
+ * wrapped so they re-evaluate when the control-flow re-renders — e.g.
+ * `<Show when={data}>{data?.value?.message}</Show>`. Children of user
+ * components are left unwrapped so reactive values forward through the
+ * `children` prop (the child's own JSX handles reactivity).
+ */
+function isBuiltinControlFlowComponent(componentName: string | null): boolean {
+  return !!componentName && BUILTIN_REACTIVE_PROPS.has(componentName);
+}
+
 export function trackReactiveImports(ast: t.Node): ImportNames {
   const names: ImportNames = {
     createMutable: new Set(),
@@ -86,6 +100,7 @@ export function trackReactiveImports(ast: t.Node): ImportNames {
     signal: new Set(),
     computed: new Set(),
     useState: new Set(),
+    useFetch: new Set(),
     cc: new Set(),
   };
 
@@ -136,6 +151,18 @@ export interface GetterBinding {
   kind: "getter";
 }
 
+/**
+ * Binding for a variable holding the object returned by `useFetch()` /
+ * `createFetch()(...)`. Every property on that object is a `Signal` or
+ * `Computed`, so a read like `f.data.value` (path `["data", "value"]`) is
+ * reactive. The shell object itself (`f`) and a bare property (`f.data`, the
+ * signal object) are NOT reactive reads — the runtime `resolve()` unwraps them
+ * inside effects when forwarded to control-flow props such as `<Show when>`.
+ */
+export interface SignalObjectBinding {
+  kind: "signalObject";
+}
+
 export interface PropBinding {
   kind: "prop";
 }
@@ -145,6 +172,7 @@ export type Binding =
   | SignalBinding
   | ComputedBinding
   | GetterBinding
+  | SignalObjectBinding
   | PropBinding;
 
 export interface ReactiveScope {
@@ -177,6 +205,48 @@ function isReactiveSourceCall(
   return null;
 }
 
+/**
+ * Methods on the `useFetch` shell that return another shell (so the result is
+ * still a signal-bearing object). Used to recognize chained calls such as
+ * `useFetch(url).json()` and `useFetch(url).get(payload)` as useFetch calls.
+ */
+const USEFETCH_CHAIN_METHODS = new Set([
+  "json",
+  "text",
+  "blob",
+  "arrayBuffer",
+  "formData",
+  "get",
+  "put",
+  "post",
+  "delete",
+  "patch",
+  "head",
+  "options",
+]);
+
+/**
+ * True if `expr` is a call that produces a `useFetch` shell — either a direct
+ * `useFetch(...)` call or a chained `useFetch(...).<method>(...)` where
+ * `<method>` is one of the shell-returning methods (json/text/get/...).
+ */
+function isUseFetchCall(expr: t.Expression, names: ImportNames): boolean {
+  if (!t.isCallExpression(expr)) return false;
+  const callee = expr.callee;
+  if (t.isIdentifier(callee)) {
+    return names.useFetch.has(callee.name);
+  }
+  if (
+    t.isMemberExpression(callee) &&
+    !callee.computed &&
+    t.isIdentifier(callee.property) &&
+    USEFETCH_CHAIN_METHODS.has(callee.property.name)
+  ) {
+    return isUseFetchCall(callee.object as t.Expression, names);
+  }
+  return false;
+}
+
 function trackLocalScopeBindings(
   path: any,
   names: ImportNames,
@@ -190,28 +260,52 @@ function trackLocalScopeBindings(
       if (!init) return;
 
       const source = isReactiveSourceCall(init, names);
-      if (!source) return;
+      if (source) {
+        if (source.isArray) {
+          if (t.isArrayPattern(id) && id.elements[0]) {
+            const first = id.elements[0];
+            if (t.isIdentifier(first)) {
+              scope.bindings.set(first.name, { kind: source.kind } as Binding);
+            }
+          }
+          return;
+        }
 
-      if (source.isArray) {
-        if (t.isArrayPattern(id) && id.elements[0]) {
-          const first = id.elements[0];
-          if (t.isIdentifier(first)) {
-            scope.bindings.set(first.name, { kind: source.kind } as Binding);
+        if (t.isIdentifier(id)) {
+          if (source.kind === "mutable") {
+            scope.bindings.set(id.name, {
+              kind: "mutable",
+              root: id.name,
+              path: [],
+            });
+          } else {
+            scope.bindings.set(id.name, { kind: source.kind } as Binding);
           }
         }
         return;
       }
 
-      if (t.isIdentifier(id)) {
-        if (source.kind === "mutable") {
-          scope.bindings.set(id.name, {
-            kind: "mutable",
-            root: id.name,
-            path: [],
-          });
-        } else {
-          scope.bindings.set(id.name, { kind: source.kind } as Binding);
+      // useFetch() / createFetch()(...) return an object whose properties are
+      // Signals/Computeds. Destructured properties become signal bindings; the
+      // whole object becomes a signalObject binding (property accesses like
+      // `f.data.value` are reactive).
+      if (isUseFetchCall(init, names)) {
+        if (t.isObjectPattern(id)) {
+          for (const prop of id.properties) {
+            if (
+              t.isObjectProperty(prop) &&
+              !prop.computed &&
+              t.isIdentifier(prop.value)
+            ) {
+              scope.bindings.set(prop.value.name, {
+                kind: "signal",
+              } as Binding);
+            }
+          }
+        } else if (t.isIdentifier(id)) {
+          scope.bindings.set(id.name, { kind: "signalObject" } as Binding);
         }
+        return;
       }
     },
   });
@@ -358,16 +452,43 @@ function analyzeObjectLiteralSpread(
 
 // ─── Detect reactive reads inside an expression ────────────
 
+/** True for `a.b` and optional `a?.b` member expressions. */
+function isMemberLike(
+  node: any,
+): node is t.MemberExpression | t.OptionalMemberExpression {
+  return t.isMemberExpression(node) || t.isOptionalMemberExpression(node);
+}
+
+/**
+ * Walk a (possibly optional / non-null-asserted) member-expression chain to its
+ * root identifier, returning the root name and the property path.
+ *
+ *   data?.value?.message          -> { root: "data", path: ["value", "message"] }
+ *   user.data.value!.name         -> { root: "user", path: ["data", "value", "name"] }
+ *   fetch.data.value               -> { root: "fetch", path: ["data", "value"] }
+ *
+ * `TSNonNullExpression` wrappers (`expr!`) are unwrapped. Computed member
+ * access (`a[b]`) and non-identifier properties yield `null`.
+ */
 function getMemberExpressionRootAndPath(
-  node: t.MemberExpression,
+  node: t.Node,
 ): { root: string; path: string[] } | null {
   const path: string[] = [];
-  let current: t.Expression = node;
-  while (t.isMemberExpression(current)) {
-    if (current.computed) return null;
-    if (!t.isIdentifier(current.property)) return null;
-    path.push(current.property.name);
-    current = current.object;
+  let current: t.Node = node;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (t.isTSNonNullExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    if (isMemberLike(current)) {
+      if (current.computed) return null;
+      if (!t.isIdentifier(current.property)) return null;
+      path.push(current.property.name);
+      current = current.object;
+      continue;
+    }
+    break;
   }
   if (t.isIdentifier(current)) {
     return { root: current.name, path: path.reverse() };
@@ -375,10 +496,11 @@ function getMemberExpressionRootAndPath(
   return null;
 }
 
-function isReactiveRead(
-  node: t.Identifier | t.MemberExpression,
-  scope: ReactiveScope,
-): boolean {
+function isReactiveRead(node: t.Node, scope: ReactiveScope): boolean {
+  if (t.isTSNonNullExpression(node)) {
+    return isReactiveRead(node.expression, scope);
+  }
+
   if (t.isIdentifier(node)) {
     const binding = scope.bindings.get(node.name);
     if (!binding) return false;
@@ -393,6 +515,7 @@ function isReactiveRead(
     return false;
   }
 
+  if (!isMemberLike(node)) return false;
   const rootPath = getMemberExpressionRootAndPath(node);
   if (!rootPath) return false;
   const binding = scope.bindings.get(rootPath.root);
@@ -408,6 +531,12 @@ function isReactiveRead(
   if (binding.kind === "signal" || binding.kind === "computed") {
     return rootPath.path[0] === "value";
   }
+  // useFetch shell: `f.<prop>.value...` reads the underlying signal.
+  // `f` alone or `f.<prop>` (the signal object) is not a reactive read — the
+  // runtime resolve() unwraps it inside effects when forwarded to control flow.
+  if (binding.kind === "signalObject") {
+    return rootPath.path.length >= 2 && rootPath.path[1] === "value";
+  }
   return false;
 }
 
@@ -418,10 +547,11 @@ function isGetterCall(node: t.CallExpression, scope: ReactiveScope): boolean {
   return binding?.kind === "getter";
 }
 
-export function isReactiveValue(
-  node: t.Identifier | t.MemberExpression,
-  scope: ReactiveScope,
-): boolean {
+export function isReactiveValue(node: t.Node, scope: ReactiveScope): boolean {
+  if (t.isTSNonNullExpression(node)) {
+    return isReactiveValue(node.expression, scope);
+  }
+
   if (t.isIdentifier(node)) {
     const binding = scope.bindings.get(node.name);
     if (!binding) return false;
@@ -433,6 +563,7 @@ export function isReactiveValue(
     );
   }
 
+  if (!isMemberLike(node)) return false;
   const rootPath = getMemberExpressionRootAndPath(node);
   if (!rootPath) return false;
   const binding = scope.bindings.get(rootPath.root);
@@ -443,6 +574,9 @@ export function isReactiveValue(
   }
   if (binding.kind === "signal" || binding.kind === "computed") {
     return rootPath.path[0] === "value";
+  }
+  if (binding.kind === "signalObject") {
+    return rootPath.path.length >= 2 && rootPath.path[1] === "value";
   }
   return false;
 }
@@ -457,7 +591,11 @@ export function containsReactiveValue(
     if (found) return;
     if (!node || typeof node !== "object") return;
 
-    if (t.isMemberExpression(node) || t.isIdentifier(node)) {
+    if (
+      isMemberLike(node) ||
+      t.isTSNonNullExpression(node) ||
+      t.isIdentifier(node)
+    ) {
       if (isReactiveValue(node, scope)) {
         found = true;
         return;
@@ -508,7 +646,11 @@ function containsReactiveRead(
     if (found) return;
     if (!node || typeof node !== "object") return;
 
-    if (t.isMemberExpression(node) || t.isIdentifier(node)) {
+    if (
+      isMemberLike(node) ||
+      t.isTSNonNullExpression(node) ||
+      t.isIdentifier(node)
+    ) {
       if (isReactiveRead(node, scope)) {
         found = true;
         return;
@@ -617,6 +759,7 @@ function isReactiveComponentProp(
   info: ComponentExpressionInfo,
   componentNames: Map<string, t.Function>,
   reactiveProps: Map<t.Function, Set<string>>,
+  importedReactiveProps: Map<string, Set<string>>,
 ): boolean {
   if (!info.isComponent || !info.componentName || !info.attributeName) {
     return false;
@@ -627,10 +770,18 @@ function isReactiveComponentProp(
   }
 
   const componentFn = componentNames.get(info.componentName);
-  if (!componentFn) return false;
-  const props = reactiveProps.get(componentFn);
-  if (!props) return false;
-  return props.has(info.attributeName);
+  if (componentFn) {
+    const props = reactiveProps.get(componentFn);
+    if (!props) return false;
+    return props.has(info.attributeName);
+  }
+
+  // Component is imported from another module: consult cross-file metadata
+  // resolved from analyzeMetadata. The localName used at the call site maps
+  // to the reactive prop set computed for the imported component's export.
+  const importedProps = importedReactiveProps.get(info.componentName);
+  if (!importedProps) return false;
+  return importedProps.has(info.attributeName);
 }
 
 function shouldWrap(expr: t.Expression, scope: ReactiveScope): boolean {
@@ -640,6 +791,118 @@ function shouldWrap(expr: t.Expression, scope: ReactiveScope): boolean {
   // Empty JSX expression
   if (t.isJSXEmptyExpression(expr)) return false;
   return containsReactiveRead(expr, scope);
+}
+
+/**
+ * Identifier used for the runtime `resolve` helper imported from
+ * `sinwan/reactivity` when prop-rooted member expressions need unwrapping.
+ * Prefixed with `_$` to avoid collisions with user code.
+ */
+const RESOLVE_HELPER = "_$unwrap";
+
+/**
+ * Walk an expression tree and replace the root identifier of every member
+ * expression chain rooted at a **prop** binding with `resolve(root)`.
+ *
+ * This is necessary because reactive values forwarded through component props
+ * arrive as zero-arity getter functions (the compiler wraps them at the call
+ * site). A member access like `user.name` on a getter function returns
+ * `Function.name` rather than the data. Wrapping the root in `resolve()`
+ * unwraps the getter chain to the underlying value (e.g. a `createMutable`
+ * proxy) before the member access, so reactivity is preserved.
+ *
+ * Member expressions rooted at non-prop bindings (local mutables, signals,
+ * etc.) are left untouched — their roots are already the actual reactive
+ * objects, not getters.
+ *
+ * Returns `{ changed: true }` when any replacement was made, so the caller
+ * knows to emit the `resolve` import.
+ */
+function transformPropMemberAccess(
+  expr: t.Expression,
+  scope: ReactiveScope,
+): boolean {
+  let changed = false;
+
+  function resolveRoot(rootName: string): t.Expression {
+    return t.callExpression(t.identifier(RESOLVE_HELPER), [
+      t.identifier(rootName),
+    ]);
+  }
+
+  // Replace the innermost `.object` of a (possibly optional / non-null)
+  // member-expression chain with `resolve(rootIdentifier)`. Mutates the chain
+  // in place — safe because the expression is about to be wrapped and the
+  // original JSX container replaced.
+  function replaceMemberRoot(
+    node: t.MemberExpression | t.OptionalMemberExpression,
+    rootName: string,
+  ): void {
+    // `any` avoids brittle control-flow narrowing across the mixed
+    // MemberExpression / OptionalMemberExpression / TSNonNullExpression chain.
+    let current: any = node;
+    let parent: any = null;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (t.isTSNonNullExpression(current)) {
+        current = current.expression;
+        continue;
+      }
+      if (!isMemberLike(current)) break;
+      parent = current;
+      current = current.object;
+    }
+    if (parent && t.isIdentifier(current) && current.name === rootName) {
+      parent.object = resolveRoot(rootName);
+    }
+  }
+
+  function visit(node: any): void {
+    if (!node || typeof node !== "object") return;
+
+    // Don't recurse into nested function bodies — separate scopes.
+    if (t.isArrowFunctionExpression(node) || t.isFunctionExpression(node))
+      return;
+
+    if (isMemberLike(node)) {
+      const rootPath = getMemberExpressionRootAndPath(node);
+      if (rootPath) {
+        const binding = scope.bindings.get(rootPath.root);
+        if (binding && binding.kind === "prop") {
+          replaceMemberRoot(node, rootPath.root);
+          changed = true;
+          // Don't recurse further into this chain — the root is already
+          // resolved and intermediate members are on the resolved value.
+          return;
+        }
+      }
+      // Root is not a prop — member access is safe as-is.
+      return;
+    }
+
+    // Recurse into children of non-member-expression nodes.
+    for (const key of Object.keys(node)) {
+      if (
+        key === "loc" ||
+        key === "start" ||
+        key === "end" ||
+        key === "leadingComments" ||
+        key === "trailingComments"
+      )
+        continue;
+      const value = (node as any)[key];
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (item && typeof item === "object") visit(item);
+        }
+      } else if (value && typeof value === "object") {
+        visit(value);
+      }
+    }
+  }
+
+  visit(expr);
+  return changed;
 }
 
 function wrapExpression(expr: t.Expression): t.Expression {
@@ -945,52 +1208,11 @@ export function wrapReactiveExpressions(
     explicitBindings?: boolean;
     analyze?: string;
     analyzeMetadata?: Map<string, Map<string, Set<string>>>;
+    resolveImport?: (source: string, fromFile: string) => string | null;
     filename?: string;
   } = {},
 ): void {
-  const names = trackReactiveImports(ast);
-  const hasAnyImport = Object.values(names).some((s) => s.size > 0);
-  if (!hasAnyImport) return;
-
-  const {
-    functions: componentFunctions,
-    names: componentNames,
-    exported,
-  } = collectComponentFunctions(ast, names.cc);
-  const localScopes = computeLocalScopes(ast, names);
-  const callGraph = collectComponentCallGraph(ast, componentNames);
-  const reactiveProps = propagateReactiveProps(
-    localScopes,
-    callGraph,
-    componentFunctions,
-  );
-
-  // Build a map from exported component function to its export name.
-  const exportNameByFn = new Map<t.Function, string>();
-  for (const [localName, fn] of componentNames) {
-    if (exported.has(fn)) {
-      exportNameByFn.set(fn, localName);
-    }
-  }
-  traverse(ast, {
-    ExportDefaultDeclaration(path: any) {
-      const decl = path.node.declaration;
-      if (t.isIdentifier(decl)) {
-        const fn = componentNames.get(decl.name);
-        if (fn) exportNameByFn.set(fn, "default");
-      } else if (t.isCallExpression(decl)) {
-        const callee = decl.callee;
-        if (t.isIdentifier(callee) && names.cc.has(callee.name)) {
-          const firstArg = decl.arguments[0];
-          if (firstArg && t.isFunction(firstArg)) {
-            exportNameByFn.set(firstArg, "default");
-          }
-        }
-      }
-    },
-  });
-
-  // Load project-wide metadata if available.
+  // ─── Load metadata (not a traverse) ───────────────────────
   let metadata: Map<string, Map<string, Set<string>>> | null = null;
   if (options.analyzeMetadata) {
     metadata = options.analyzeMetadata;
@@ -1004,6 +1226,265 @@ export function wrapReactiveExpressions(
   const absoluteFilename = options.filename
     ? path.resolve(options.filename)
     : null;
+  const resolveImport = options.resolveImport;
+
+  // ─── Pass 1: Fused collection (single traverse) ──────────
+  // Collects: reactive imports, component functions, exports, local scopes,
+  // call graph, cross-module prop metadata, and existing `unwrap` import.
+  // Previously 5-7 separate traverses; now one.
+  const names: ImportNames = {
+    createMutable: new Set(),
+    createStore: new Set(),
+    signal: new Set(),
+    computed: new Set(),
+    useState: new Set(),
+    useFetch: new Set(),
+    cc: new Set(),
+  };
+  const componentFunctions = new Set<t.Function>();
+  const componentNames = new Map<string, t.Function>();
+  const exported = new Set<t.Function>();
+  const localScopes = new Map<t.Function, ReactiveScope>();
+  const callGraph = new Map<t.Function, CallSite[]>();
+  // Raw call graph stores callee names before resolution (see JSXElement visitor).
+  const rawCallGraph = new Map<
+    t.Function,
+    {
+      calleeName: string;
+      props: { name: string; value: t.Expression }[];
+      spreads: t.Expression[];
+    }[]
+  >();
+  const importedReactiveProps = new Map<string, Set<string>>();
+  const exportNameByFn = new Map<t.Function, string>();
+  let hasUnwrapImport = false;
+
+  traverse(ast, {
+    ImportDeclaration(p: any) {
+      const source = p.node.source.value as string;
+
+      // Reactive source imports + component factory imports
+      const reactiveAllowed = REACTIVE_SOURCE_MODULES[source];
+      const componentAllowed = COMPONENT_FACTORY_MODULES[source];
+      if (reactiveAllowed || componentAllowed) {
+        for (const spec of p.node.specifiers) {
+          if (!t.isImportSpecifier(spec)) continue;
+          const imported = t.isIdentifier(spec.imported)
+            ? spec.imported.name
+            : spec.imported.value;
+          if (reactiveAllowed?.has(imported)) {
+            (names as any)[imported].add(spec.local.name as string);
+          } else if (componentAllowed?.has(imported)) {
+            names.cc.add(spec.local.name as string);
+          }
+        }
+      }
+
+      // Check for existing `unwrap` import from sinwan/reactivity
+      if (source === "sinwan/reactivity") {
+        for (const spec of p.node.specifiers) {
+          if (
+            t.isImportSpecifier(spec) &&
+            t.isIdentifier(spec.imported) &&
+            spec.imported.name === "unwrap"
+          ) {
+            hasUnwrapImport = true;
+          }
+        }
+      }
+
+      // Cross-module reactive prop metadata for imported components
+      if (
+        metadata &&
+        absoluteFilename &&
+        resolveImport &&
+        source.startsWith(".")
+      ) {
+        const resolved = resolveImport(source, absoluteFilename);
+        if (resolved) {
+          const fileProps = metadata.get(resolved);
+          if (fileProps) {
+            for (const spec of p.node.specifiers) {
+              if (!t.isImportSpecifier(spec)) continue;
+              const imported = t.isIdentifier(spec.imported)
+                ? spec.imported.name
+                : spec.imported.value;
+              if (!imported || !/^[A-Z]/.test(imported)) continue;
+              const props = fileProps.get(imported);
+              if (props && props.size > 0) {
+                importedReactiveProps.set(spec.local.name, new Set(props));
+              }
+            }
+          }
+        }
+      }
+    },
+
+    CallExpression(p: any) {
+      // Collect cc() component functions
+      const callee = p.node.callee;
+      if (!t.isIdentifier(callee) || !names.cc.has(callee.name)) return;
+      const firstArg = p.node.arguments[0];
+      if (!firstArg || !t.isFunction(firstArg)) return;
+      const componentFn = firstArg as t.Function;
+      componentFunctions.add(componentFn);
+      const parent = p.parentPath;
+      if (
+        parent &&
+        parent.isVariableDeclarator &&
+        parent.isVariableDeclarator()
+      ) {
+        const id = parent.node.id;
+        if (t.isIdentifier(id)) {
+          componentNames.set(id.name, componentFn);
+        }
+      } else if (
+        parent &&
+        parent.isExportNamedDeclaration &&
+        parent.isExportNamedDeclaration()
+      ) {
+        const declaration = parent.node.declaration;
+        if (t.isVariableDeclaration(declaration)) {
+          for (const decl of declaration.declarations) {
+            if (t.isIdentifier(decl.id)) {
+              componentNames.set(decl.id.name, componentFn);
+            }
+          }
+        }
+      }
+    },
+
+    ExportNamedDeclaration(p: any) {
+      // Mark component functions as exported
+      const declaration = p.node.declaration;
+      if (!t.isVariableDeclaration(declaration)) return;
+      for (const decl of declaration.declarations) {
+        const init = decl.init;
+        if (!init || !t.isCallExpression(init)) continue;
+        const callee = init.callee;
+        if (!t.isIdentifier(callee) || !names.cc.has(callee.name)) continue;
+        const firstArg = init.arguments[0];
+        if (!firstArg || !t.isFunction(firstArg)) continue;
+        exported.add(firstArg as t.Function);
+      }
+    },
+
+    ExportDefaultDeclaration(p: any) {
+      const decl = p.node.declaration;
+      if (t.isIdentifier(decl)) {
+        const fn = componentNames.get(decl.name);
+        if (fn) {
+          exported.add(fn);
+          exportNameByFn.set(fn, "default");
+        }
+      } else if (t.isCallExpression(decl)) {
+        const callee = decl.callee;
+        if (t.isIdentifier(callee) && names.cc.has(callee.name)) {
+          const firstArg = decl.arguments[0];
+          if (firstArg && t.isFunction(firstArg)) {
+            exported.add(firstArg as t.Function);
+            exportNameByFn.set(firstArg as t.Function, "default");
+          }
+        }
+      }
+    },
+
+    Function(p: any) {
+      // Compute local scope bindings for this function
+      const scope: ReactiveScope = { bindings: new Map() };
+      trackLocalScopeBindings(p, names, scope);
+      localScopes.set(p.node, scope);
+    },
+
+    JSXElement(p: any) {
+      // Build component call graph entry — store raw callee name and resolve
+      // after the traverse (component names may not be collected yet during
+      // a single fused pass, since `const Child = cc(...)` may appear after
+      // `<Child />` in the AST).
+      const name = p.node.openingElement.name;
+      if (!t.isJSXIdentifier(name)) return;
+      const callerPath = p.findParent((pp: any) => pp.isFunction());
+      const callerFn = callerPath ? callerPath.node : null;
+      if (!callerFn) return;
+
+      const props: { name: string; value: t.Expression }[] = [];
+      const spreads: t.Expression[] = [];
+      for (const attr of p.node.openingElement.attributes) {
+        if (t.isJSXSpreadAttribute(attr)) {
+          if (attr.argument) {
+            spreads.push(attr.argument as t.Expression);
+          }
+          continue;
+        }
+        if (t.isJSXAttribute(attr)) {
+          const attrName = (attr.name as t.JSXIdentifier).name;
+          if (!attrName) continue;
+          if (t.isJSXExpressionContainer(attr.value)) {
+            const expr = attr.value.expression;
+            if (!expr || t.isJSXEmptyExpression(expr)) continue;
+            props.push({ name: attrName, value: expr as t.Expression });
+          }
+        }
+      }
+
+      const childExprs: t.Expression[] = [];
+      for (const child of p.node.children) {
+        if (t.isJSXExpressionContainer(child)) {
+          const expr = child.expression;
+          if (!expr || t.isJSXEmptyExpression(expr)) continue;
+          childExprs.push(expr as t.Expression);
+        }
+      }
+      if (childExprs.length === 1) {
+        props.push({ name: "children", value: childExprs[0]! });
+      } else if (childExprs.length > 1) {
+        props.push({ name: "children", value: t.arrayExpression(childExprs) });
+      }
+
+      // Store with raw name — resolved to callee function after traverse
+      const sites = rawCallGraph.get(callerFn) ?? [];
+      sites.push({ calleeName: name.name, props, spreads });
+      rawCallGraph.set(callerFn, sites);
+    },
+  });
+
+  // Resolve raw call graph names to component functions (after all
+  // CallExpression visitors have populated componentNames).
+  for (const [callerFn, sites] of rawCallGraph) {
+    const resolved: CallSite[] = [];
+    for (const site of sites) {
+      const callee = componentNames.get(site.calleeName);
+      if (callee) {
+        resolved.push({ callee, props: site.props, spreads: site.spreads });
+      }
+    }
+    if (resolved.length > 0) {
+      callGraph.set(callerFn, resolved);
+    }
+  }
+
+  // Build exportNameByFn for named exports (after componentNames is populated)
+  for (const [localName, fn] of componentNames) {
+    if (exported.has(fn)) {
+      if (!exportNameByFn.has(fn)) {
+        exportNameByFn.set(fn, localName);
+      }
+    }
+  }
+
+  const hasAnyImport = Object.values(names).some((s) => s.size > 0);
+  if (!hasAnyImport) return;
+
+  // ─── Fixed-point: propagate reactive props (not a traverse) ───
+  const reactiveProps = propagateReactiveProps(
+    localScopes,
+    callGraph,
+    componentFunctions,
+  );
+
+  // ─── Pass 2: Transform (single traverse) ─────────────────
+  // Track whether any expression needed the `resolve` runtime helper.
+  let needsResolve = false;
 
   traverse(ast, {
     Function(path: any) {
@@ -1047,13 +1528,38 @@ export function wrapReactiveExpressions(
           const expr = exprPath.node.expression as t.Expression;
           const compInfo = getComponentExpressionInfo(exprPath);
           if (compInfo.isComponent) {
-            if (
-              !isReactiveComponentProp(compInfo, componentNames, reactiveProps)
-            ) {
-              return;
+            if (compInfo.attributeName !== null) {
+              // Component attribute — wrap only if it is a reactive prop.
+              if (
+                !isReactiveComponentProp(
+                  compInfo,
+                  componentNames,
+                  reactiveProps,
+                  importedReactiveProps,
+                )
+              ) {
+                return;
+              }
+            } else {
+              // Direct child expression of a component. For user components,
+              // leave children unwrapped so reactive values forward through
+              // the `children` prop (the child's own JSX re-renders). For
+              // built-in control-flow components (e.g. <Show>), the children
+              // are rendered directly, so fall through to `shouldWrap` and
+              // wrap reactive expression children (render-prop functions and
+              // static values are skipped by `shouldWrap`).
+              if (!isBuiltinControlFlowComponent(compInfo.componentName)) {
+                return;
+              }
             }
           }
           if (shouldWrap(expr, scope)) {
+            // Before wrapping, replace prop-rooted member expressions (e.g.
+            // `user.name`) with `resolve(user).name` so that getter-valued
+            // props are unwrapped before member access at runtime.
+            if (transformPropMemberAccess(expr, scope)) {
+              needsResolve = true;
+            }
             exprPath.replaceWith(
               t.jsxExpressionContainer(
                 createBindingDescriptor(expr, exprPath, options),
@@ -1064,4 +1570,21 @@ export function wrapReactiveExpressions(
       });
     },
   });
+
+  // If any prop-rooted member expression was transformed, add the runtime
+  // `resolve` import so `_$resolve` is in scope at runtime. `hasUnwrapImport`
+  // was tracked during Pass 1's ImportDeclaration visit — no extra traverse.
+  if (needsResolve && !hasUnwrapImport) {
+    (ast as t.File).program.body.unshift(
+      t.importDeclaration(
+        [
+          t.importSpecifier(
+            t.identifier(RESOLVE_HELPER),
+            t.identifier("unwrap"),
+          ),
+        ],
+        t.stringLiteral("sinwan/reactivity"),
+      ),
+    );
+  }
 }

@@ -6,6 +6,8 @@
  */
 
 export { transformJSX, type TransformOptions } from "./transform";
+export { COMPILER_TEMPLATE_SLOT_PROTOCOL } from "./transform";
+export { autoWrapComponents } from "./auto-cc";
 export {
   analyze,
   analyzeProject,
@@ -20,6 +22,7 @@ export {
   type WorkspacesConfig,
 } from "./analyze";
 
+export { collectExportedComponents, type ExportedComponent } from "./exports";
 export { runAnalyzeCli } from "./cli";
 export {
   wrapReactiveExpressions,

@@ -7,6 +7,7 @@
  */
 
 import { parse } from "@babel/parser";
+import { autoWrapComponents } from "./auto-cc";
 import { wrapReactiveExpressions } from "./reactive-wrap";
 import _generate from "@babel/generator";
 const generate =
@@ -32,6 +33,14 @@ export interface TransformOptions {
   analyze?: string;
   /** In-memory reactive-props metadata (used by plugin-level caches). */
   analyzeMetadata?: Map<string, Map<string, Set<string>>>;
+  /**
+   * Resolves an import source (e.g. "./Child") to an absolute file path,
+   * relative to the file being transformed. Used to look up reactive-prop
+   * metadata for components imported from other modules so reactive values
+   * passed to them are wrapped at the call site. When omitted, cross-module
+   * component call sites fall back to the conservative (non-wrapping) behavior.
+   */
+  resolveImport?: (source: string, fromFile: string) => string | null;
 }
 
 interface TemplateSlot {
@@ -49,13 +58,33 @@ interface ExtractedTemplate {
 /**
  * Template slot marker encoding.
  *
- * Must stay in sync with the runtime's `DEFAULT_TEMPLATE_SLOT_PROTOCOL`
- * in `sinwan/src/renderer/template-protocol.ts`.
+ * This mirrors the runtime's `DEFAULT_TEMPLATE_SLOT_PROTOCOL` in
+ * `sinwan/src/renderer/template-protocol.ts`. The compiler cannot import the
+ * runtime (separate packages), so the format is duplicated here. A drift test
+ * (`sinwan/__tests__/compiler-protocol-drift.test.ts`) asserts the two stay
+ * in sync.
  */
-const SLOT_PREFIX = "s";
-let slotId = 0;
-function nextSlotId(): string {
-  return `<!--${SLOT_PREFIX}:${slotId++}-->`;
+export const COMPILER_TEMPLATE_SLOT_PROTOCOL = {
+  slotPrefix: "s",
+  encodeSlot(index: number): string {
+    return `s:${index}`;
+  },
+  decodeSlot(data: string): number | null {
+    if (data.startsWith("s:")) {
+      const idx = parseInt(data.slice(2), 10);
+      return Number.isNaN(idx) ? null : idx;
+    }
+    return null;
+  },
+} as const;
+
+/** Mutable counter threaded through extraction to avoid module-level state. */
+interface SlotCounter {
+  value: number;
+}
+
+function nextSlotId(counter: SlotCounter): string {
+  return `<!--${COMPILER_TEMPLATE_SLOT_PROTOCOL.encodeSlot(counter.value++)}-->`;
 }
 
 const VOID_ELEMENTS = new Set([
@@ -124,9 +153,9 @@ function cleanJSXText(value: string): string {
 }
 
 function extractTemplate(node: any, filename: string): ExtractedTemplate {
-  slotId = 0;
+  const counter: SlotCounter = { value: 0 };
   const slots: TemplateSlot[] = [];
-  const html = elementToHtml(node, slots, [], filename);
+  const html = elementToHtml(node, slots, [], filename, counter);
   return { html, slots };
 }
 
@@ -209,10 +238,14 @@ function elementToHtml(
   slots: TemplateSlot[],
   path: number[],
   filename: string,
+  counter: SlotCounter,
 ): string {
   const tagName = jsxNameToString(node.openingElement.name);
   if (tagName === "") return "";
-  // Component calls (capitalized tags) cannot be hoisted into HTML strings
+  // The root element passed to extractTemplate is guaranteed lowercase by
+  // transformJSX (it skips capitalized tags). Capitalized children are handled
+  // in childrenToHtml as component child slots, so we never recurse into
+  // elementToHtml with a component tag. Defensive guard kept for safety.
   const firstChar = tagName.charAt(0);
   if (firstChar && firstChar === firstChar.toUpperCase()) {
     throw new Error("Cannot hoist element containing component calls");
@@ -273,7 +306,14 @@ function elementToHtml(
   html += isVoid ? " />" : ">";
   if (isVoid) return html;
 
-  const childResult = childrenToHtml(node.children, slots, path, filename, 0);
+  const childResult = childrenToHtml(
+    node.children,
+    slots,
+    path,
+    filename,
+    0,
+    counter,
+  );
   html += childResult.html;
 
   html += `</${tagName}>`;
@@ -286,6 +326,7 @@ function childrenToHtml(
   path: number[],
   filename: string,
   startIndex: number,
+  counter: SlotCounter,
 ): { html: string; childIndex: number } {
   let html = "";
   let childIndex = startIndex;
@@ -298,7 +339,7 @@ function childrenToHtml(
       }
     } else if (child.type === "JSXExpressionContainer") {
       if (child.expression.type === "JSXEmptyExpression") continue;
-      const slot = nextSlotId();
+      const slot = nextSlotId(counter);
       slots.push({
         path: [...path, childIndex],
         type: "child",
@@ -307,8 +348,35 @@ function childrenToHtml(
       html += slot;
       childIndex++;
     } else if (child.type === "JSXElement") {
-      html += elementToHtml(child, slots, [...path, childIndex], filename);
-      childIndex++;
+      const childName = child.openingElement.name;
+      // Component calls (capitalized tags) cannot be hoisted into static HTML.
+      // Instead, emit a child slot whose dynamic value is the JSX element
+      // itself. The runtime child-slot branch in _$createTemplate routes it
+      // through renderNodeToDOM, which handles functional components. This
+      // lets the static shell (native tags around the component) be hoisted
+      // and reused across renders while the component call stays dynamic.
+      const childTag = childName.type === "JSXIdentifier" ? childName.name : "";
+      const isFirstCharUpper =
+        childTag && childTag.charAt(0) === childTag.charAt(0).toUpperCase();
+      if (isFirstCharUpper) {
+        const slot = nextSlotId(counter);
+        slots.push({
+          path: [...path, childIndex],
+          type: "child",
+          expr: child,
+        });
+        html += slot;
+        childIndex++;
+      } else {
+        html += elementToHtml(
+          child,
+          slots,
+          [...path, childIndex],
+          filename,
+          counter,
+        );
+        childIndex++;
+      }
     } else if (child.type === "JSXFragment") {
       const fragResult = childrenToHtml(
         child.children,
@@ -316,6 +384,7 @@ function childrenToHtml(
         path,
         filename,
         childIndex,
+        counter,
       );
       html += fragResult.html;
       childIndex = fragResult.childIndex;
@@ -343,11 +412,18 @@ export function transformJSX(
     sourceFilename: filename,
   });
 
+  // Auto-wrap exported component-like functions with `cc(...)` so plain
+  // `export function App()` / `export const App = () => <div/>` are treated as
+  // components by the reactive analyzer. Must run before `wrapReactiveExpressions`
+  // so the latter sees the `cc(...)` wrappers and processes their JSX.
+  autoWrapComponents(ast, filename);
+
   // Wrap reactive JSX expressions so the runtime can track them.
   wrapReactiveExpressions(ast, {
     explicitBindings: options.explicitBindings,
     analyze: options.analyze,
     analyzeMetadata: options.analyzeMetadata,
+    resolveImport: options.resolveImport,
     filename,
   });
 
@@ -388,13 +464,49 @@ export function transformJSX(
         path.replaceWith(
           parentIsJSX ? t.jsxExpressionContainer(templateExpr) : templateExpr,
         );
-      } catch {
-        /* leave as-is */
+      } catch (err) {
+        // Hoisting is intentionally skipped for unsupported constructs (spread
+        // attributes, refs, member-expression tag names). But genuine compiler
+        // bugs also land here and would be silently indistinguishable. In dev
+        // mode, surface the reason so regressions are debuggable.
+        if (options.dev) {
+          console.warn(
+            `[Sinwan] template hoisting skipped in ${filename}: ${(err as Error).message}`,
+          );
+        }
       }
     },
   });
 
   if (templates.length === 0) {
+    // Even with no hoisted templates, explicit bindings may have emitted
+    // _$bindText/_$bindAttr calls in non-hoisted JSX. Add the import so
+    // those calls resolve at runtime. The non-template renderers unwrap
+    // binding descriptors to their getter functions.
+    if (options.explicitBindings) {
+      const bindingImport = t.importDeclaration(
+        [
+          t.importSpecifier(
+            t.identifier("_$bindText"),
+            t.identifier("_$bindText"),
+          ),
+          t.importSpecifier(
+            t.identifier("_$bindAttr"),
+            t.identifier("_$bindAttr"),
+          ),
+          t.importSpecifier(
+            t.identifier("_$bindStyle"),
+            t.identifier("_$bindStyle"),
+          ),
+          t.importSpecifier(
+            t.identifier("_$bindClass"),
+            t.identifier("_$bindClass"),
+          ),
+        ],
+        t.stringLiteral("sinwan/renderer"),
+      );
+      ast.program.body.unshift(bindingImport);
+    }
     const result = generate(ast, {
       sourceMaps: true,
       sourceFileName: filename,

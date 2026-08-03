@@ -28,6 +28,7 @@ import {
   type ReactiveScope,
   type CallSite,
 } from "./reactive-wrap";
+import { autoWrapComponents } from "./auto-cc";
 
 export type ImportInfo = {
   source: string;
@@ -392,6 +393,12 @@ export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
     sourceType: "module",
     plugins: ["jsx", "typescript"],
   });
+
+  // Mirror the transform: auto-wrap exported component-like functions with
+  // `cc(...)` before analysis so the analyzer sees the same component set the
+  // runtime will see. Must run before `trackReactiveImports` so the injected
+  // `cc` import is picked up as a component factory.
+  autoWrapComponents(ast, filePath);
 
   const names = trackReactiveImports(ast);
   const {
