@@ -76,7 +76,7 @@ export const COMPILER_TEMPLATE_SLOT_PROTOCOL = {
     }
     return null;
   },
-} as const;
+};
 
 /** Mutable counter threaded through extraction to avoid module-level state. */
 interface SlotCounter {
