@@ -260,7 +260,18 @@ function elementToHtml(
     const attrName = attr.name.name;
     if (attrName === "children") continue;
     if (attrName === "ref") {
-      throw new Error("Cannot hoist element with ref");
+      if (attr.value?.type === "JSXExpressionContainer") {
+        const expr = attr.value.expression;
+        if (expr.type !== "JSXEmptyExpression") {
+          slots.push({
+            path: [...path],
+            type: "ref",
+            name: "ref",
+            expr,
+          });
+        }
+      }
+      continue;
     }
     if (attr.value?.type === "JSXExpressionContainer") {
       const expr = attr.value.expression;

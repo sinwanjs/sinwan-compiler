@@ -1,0 +1,90 @@
+# Changelog
+
+All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
+
+## [0.2.4] — Template Hoisting with Refs, Protocol Drift Fix & Test Expansion
+
+sinwan-compiler 0.2.4 adds support for hoisting JSX elements with `ref` attributes (previously a hard error), fixes a type assertion issue in the template slot protocol, and significantly expands test coverage for compiler transforms.
+
+### Added
+
+- **Template Hoisting with Refs (`transform.ts`)**: The compiler no longer throws `Cannot hoist element with ref` when encountering a `ref` attribute during template hoisting. Instead, it emits a new `"ref"` slot type with the element's path and the ref expression. The static HTML shell is hoisted as usual (no HTML placeholder for refs — they are client-only), and the runtime `_$createTemplate` binds the ref to the cloned element via `applyRef()` after template instantiation. This works for both function refs (`ref={(el) => el?.focus()}`) and object refs (`ref={inputRef}`). The SSR renderer skips ref slots entirely (no `ref=` attribute in server output), and the hydration walker binds refs to existing DOM elements during in-place hydration. Supports refs on root elements, nested elements (with correct path resolution), and combinations with attr/event/child slots.
+- **5 new compiler tests for ref hoisting**: Tests covering function ref hoisting, object ref hoisting, ref + attr slot combination, ref + event handler combination, and nested element ref path resolution.
+
+### Fixed
+
+- **COMPILER_TEMPLATE_SLOT_PROTOCOL Const Assertion (`transform.ts`)**: Removed the `as const` assertion from the `COMPILER_TEMPLATE_SLOT_PROTOCOL` object that caused a type mismatch with the runtime's `DEFAULT_TEMPLATE_SLOT_PROTOCOL`. The `slotPrefix` property was typed as `"s"` (literal) instead of `string`, causing a type error when the drift test compared the two protocols. The object is now typed as a plain object with `string` properties, matching the runtime interface.
+
+### Changed
+
+- **TemplateSlot Type Extended**: The `TemplateSlot.type` field in the runtime (`sinwan/src/renderer/template-protocol.ts`) now accepts `"ref"` in addition to `"child"`, `"attr"`, and `"event"`. The compiler's internal `TemplateSlot` interface (which uses `type: string`) was already compatible.
+
+### Internal
+
+- Compiler tests: 141 pass / 0 fail (was 136, +5 new tests).
+- `walkToSlot` is now exported from `sinwan/src/renderer/template.ts` for use by the hydration walker.
+
+## [0.2.3] — Comprehensive Test Coverage & Slot Path Generation
+
+sinwan-compiler 0.2.3 significantly expands test coverage for the compiler transform, including component export detection, template hoisting edge cases, auto-cc wrapping, and useFetch reactive source tracking. Also adds dedicated tests for template slot path generation with fragments and siblings.
+
+### Added
+
+- **Template Slot Path Generation Tests**: Added dedicated tests verifying slot path computation for JSXFragment children (basic and nested), reactive children with attr siblings, and multiple reactive children ordering. Ensures the compiler emits correct `path` arrays that the runtime `walkToSlot` can resolve.
+- **Component Export Detection Tests**: Added 9 tests for `collectExportedComponents` covering named functions, named variables, default exports, export specifiers with rename, multiple components, non-component exports, unparseable code, and re-exports.
+- **Auto-cc Wrapping Tests**: Added tests verifying that exported uppercase functions returning JSX are automatically wrapped with `cc(...)`, including idempotency (skipping already-wrapped functions) and correct import injection.
+- **useFetch Reactive Source Tracking Tests**: Added tests verifying that `useFetch` from `sinwan/hook` is recognized as a reactive source, and that destructured members (`data`, `error`, `isLoading`) are tracked as reactive signals.
+
+### Internal
+
+- Compiler tests: 136 pass / 0 fail.
+
+## [0.2.2] — React Import Path Fix
+
+sinwan-compiler 0.2.2 fixes the reactive source module list to use the unified `sinwan/react` import path instead of the removed `sinwan/react-client`.
+
+### Fixed
+
+- **Remove `sinwan/react-client` from Reactive Sources (`reactive-wrap.ts`)**: The reactive source module list still referenced `sinwan/react-client`, which was removed in favor of the unified `sinwan/react` barrel. Updated `REACTIVE_SOURCE_MODULES` to use `sinwan/react` so that `useState` imported from `sinwan/react` is correctly tracked as a reactive source.
+
+## [0.2.1] — useState Import Path Tracking
+
+sinwan-compiler 0.2.1 fixes the reactive expression wrapper to track `useState` from the correct `sinwan/react` import path.
+
+### Fixed
+
+- **Track `useState` from `sinwan/react` (`reactive-wrap.ts`)**: `useState` was not being tracked as a reactive source because the import path check looked for `sinwan/react-client` instead of `sinwan/react`. Updated `REACTIVE_SOURCE_MODULES` and import tracking to recognize `sinwan/react` as a valid reactive source module, ensuring `const [count, setCount] = useState(0)` produces tracked bindings and `count.value` reads are wrapped in zero-arity getters.
+
+## [0.2.0] — Auto-Wrap Reactive Component Props
+
+sinwan-compiler 0.2.0 introduces automatic wrapping of reactive values passed to component props, using a built-in registry and call-graph analysis. This eliminates the need for manual `_$bindAttr` / `_$bindText` calls at component call sites.
+
+### Added
+
+- **Auto-Wrap Reactive Component Props (`reactive-wrap.ts`)**: New `autoWrapComponentProps` pass that detects reactive values (signals, computed, state getters, derived expressions) passed to component props and automatically wraps them in zero-arity getter functions. Uses a built-in registry of known reactive component props (e.g. `Show.when`, `For.each`, `Switch.fallback`) and a call-graph analysis to infer which props are reactive for user-defined components. When a component's reactive props cannot be inferred (no metadata), the pass falls back to conservative behavior (no wrapping). The pass runs after `wrapReactiveExpressions` and before template hoisting.
+
+## [0.1.0] — Initial Release
+
+sinwan-compiler 0.1.0 is the initial standalone release of the Sinwan compiler core, extracted from the monorepo. It provides the JSX transform, reactive expression wrapping, and reactive prop analysis shared by the Bun and Vite plugins.
+
+### Added
+
+- **JSX Transform (`transform.ts`)**: Transforms JSX AST to use template hoisting. Static JSX elements are extracted to module-level template strings and replaced with optimized `_$createTemplate` calls. Supports:
+  - Static HTML shell extraction with `<!--s:N-->` slot markers for dynamic children
+  - Attribute slots (`type: "attr"`) with ` name=""` placeholders
+  - Event slots (`type: "event"`) with ` onEvent=""` placeholders
+  - Component child slots (capitalized tags emitted as dynamic child slots)
+  - JSXFragment children inlining with correct path tracking
+  - Static style serialization (object and string styles serialized directly into HTML)
+  - Spread attribute detection (skips hoisting with a warning)
+  - Ref attribute detection (skips hoisting with a warning — _enhanced in 0.4.0_)
+- **Reactive Expression Wrapping (`reactive-wrap.ts`)**: Auto-wraps reactive JSX expressions in zero-arity functions. Supports `createMutable` / `createStore` from `sinwan/store`, `signal` / `computed` from `sinwan/reactivity`, and `useState` from `sinwan/react`. Handles optional chaining (`?.`) and non-null assertions (`!.`) on reactive reads. Tracks reactive source imports and wraps derived expressions.
+- **Auto-cc Component Wrapping (`auto-cc.ts`)**: `autoWrapComponents()` compiler pass that detects exported uppercase functions returning JSX and automatically wraps them with `cc(...)`, injecting the import only when needed. Idempotent — skips already-wrapped functions.
+- **Reactive Prop Analysis (`analyze.ts`)**: `analyzeProject` / `analyzeModule` / `loadMetadata` utilities for analyzing which component props are reactive. Produces a `reactive-props.json` metadata file consumed by the auto-wrap pass. Supports tsconfig path aliases and cross-module analysis. Includes `AnalyzerCache` for persistence.
+- **Component Export Detection (`exports.ts`)**: `collectExportedComponents` utility for detecting exported component-like functions in source files. Used by HMR to determine which modules need fast refresh.
+- **CLI (`cli.ts`)**: `runAnalyzeCli` command-line interface for running the reactive prop analyzer on a project.
+- **Template Slot Protocol (`transform.ts`)**: `COMPILER_TEMPLATE_SLOT_PROTOCOL` defining the `s:N` slot marker format, shared with the runtime's `DEFAULT_TEMPLATE_SLOT_PROTOCOL` via a drift test in the `sinwan` package.
+- **GitHub Actions CI/CD**: Build, test, and release workflows.
+- **MIT License**: Added license file.
+- **README**: Added comprehensive README.
+- **Analyzer Test Suite**: Comprehensive test suite for the reactive prop analyzer.

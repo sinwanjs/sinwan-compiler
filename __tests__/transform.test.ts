@@ -53,12 +53,46 @@ describe("transformJSX", () => {
     expect(result.code).toContain("{...props}");
   });
 
-  it("skips hoisting for elements with ref", () => {
+  it("hoists elements with ref into template with ref slot", () => {
     const code = `const Input = () => <input ref={(el) => el?.focus()} />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<input");
-    expect(result.code).toContain("ref=");
+    expect(result.code).toContain("_$createTemplate");
+    // The ref expression should be passed as a dynamic
+    expect(result.code).toContain("focus");
+    // The template should have a ref slot
+    expect(result.code).toContain('type: "ref"');
+  });
+
+  it("hoists elements with object ref into template with ref slot", () => {
+    const code = `const Input = () => { const r = { current: null }; return <input ref={r} />; };`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$createTemplate");
+    expect(result.code).toContain('type: "ref"');
+  });
+
+  it("hoists elements with ref + dynamic attr into template with both slot types", () => {
+    const code = `const Input = ({ placeholder }) => <input ref={(el) => el?.focus()} placeholder={placeholder} />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$createTemplate");
+    expect(result.code).toContain('type: "ref"');
+    expect(result.code).toContain('type: "attr"');
+  });
+
+  it("hoists elements with ref + event handler into template with both slot types", () => {
+    const code = `const Input = () => <input ref={(el) => el?.focus()} onclick={() => console.log("click")} />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$createTemplate");
+    expect(result.code).toContain('type: "ref"');
+    expect(result.code).toContain('type: "event"');
+  });
+
+  it("hoists nested elements with ref with correct path", () => {
+    const code = `const Form = () => <form><input ref={(el) => el?.focus()} /></form>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$createTemplate");
+    expect(result.code).toContain('type: "ref"');
+    // The input is at child index 0 of the form (root)
+    expect(result.code).toContain("path: [0]");
   });
 
   it("ignores whitespace JSXText when computing child paths", () => {
