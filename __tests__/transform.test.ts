@@ -19,6 +19,268 @@ describe("transformJSX", () => {
     );
   });
 
+  it("emits HTML value for input defaultValue so the field shows its default", () => {
+    const code = `const Form = () => <input name="endpoint" defaultValue="/api/hello" placeholder="/api/hello" />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain(
+      'html: "<input name=\\"endpoint\\" value=\\"/api/hello\\" placeholder=\\"/api/hello\\" />"',
+    );
+    expect(result.code).not.toContain("defaultValue");
+  });
+
+  it("emits HTML checked for defaultChecked", () => {
+    const code = `const Box = () => <input type="checkbox" defaultChecked />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain(
+      'html: "<input type=\\"checkbox\\" checked />"',
+    );
+    expect(result.code).not.toContain("defaultChecked");
+  });
+
+  it("emits textarea defaultValue as text content", () => {
+    const code = `const Note = () => <textarea defaultValue="hello" />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('html: "<textarea>hello</textarea>"');
+    expect(result.code).not.toContain("defaultValue");
+  });
+
+  it("maps dynamic defaultValue slots to the HTML value attribute", () => {
+    const code = `const Field = ({ v }) => <input defaultValue={v} />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('html: "<input value=\\"\\" />"');
+    expect(result.code).toContain('name: "defaultValue"');
+  });
+
+  it("does not hoist select with defaultValue so the enhancer can select options", () => {
+    const code = `const Field = () => (
+      <select defaultValue="b">
+        <option value="a">A</option>
+        <option value="b">B</option>
+      </select>
+    );`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("<select");
+    expect(result.code).toContain("defaultValue");
+  });
+
+  it("does not hoist select with a controlled value", () => {
+    const code = `const Field = ({ v }) => <select value={v}><option value="a">A</option></select>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("<select");
+  });
+
+  it("slots nested select defaults through jsx while hoisting the shell", () => {
+    const code = `const Form = () => (
+      <div>
+        <select defaultValue="b">
+          <option value="b">B</option>
+        </select>
+      </div>
+    );`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('html: "<div><!--s:0--></div>"');
+    expect(result.code).toContain("<select defaultValue");
+  });
+
+  it("does not hoist a controlled textarea value", () => {
+    const code = `const Note = ({ v }) => <textarea value={v} />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("<textarea");
+  });
+
+  it("slots option selected through jsx so the enhancer still rejects it", () => {
+    const code = `const Field = () => (
+      <select>
+        <option selected value="a">A</option>
+      </select>
+    );`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('html: "<select><!--s:0--></select>"');
+    expect(result.code).toContain("<option selected");
+  });
+
+  it("does not hoist form with a function action", () => {
+    const code = `const Page = ({ save }) => <form action={save}><button type="submit">Go</button></form>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("<form");
+  });
+
+  it("does not hoist form with a spread and a function action", () => {
+    const code = `const Page = ({ save, rest }) => <form {...rest} action={save}><button type="submit">Go</button></form>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("action={save}");
+  });
+
+  it("hoists a form with no action", () => {
+    const code = `const Page = () => <form method="post"><button type="submit">Go</button></form>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$createTemplate");
+    expect(result.code).toContain('method=\\"post\\"');
+  });
+
+  it("hoists form with a string action", () => {
+    const code = `const Page = () => <form action="/save"><button type="submit">Go</button></form>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$createTemplate");
+    expect(result.code).toContain('action=\\"/save\\"');
+  });
+
+  it("does not hoist input or button with a function formAction", () => {
+    const input = transformJSX(
+      `const Field = ({ save }) => <input type="submit" formAction={save} />;`,
+      "test.tsx",
+    );
+    expect(input.code).not.toContain("_$createTemplate");
+    expect(input.code).toContain("formAction");
+
+    const button = transformJSX(
+      `const Field = ({ save }) => <button type="submit" formAction={save}>Go</button>;`,
+      "test.tsx",
+    );
+    expect(button.code).not.toContain("_$createTemplate");
+    expect(button.code).toContain("formAction");
+  });
+
+  it("hoists input and button with a string formAction", () => {
+    const input = transformJSX(
+      `const Field = () => <input type="submit" formAction="/save" />;`,
+      "test.tsx",
+    );
+    expect(input.code).toContain("_$createTemplate");
+    expect(input.code).toContain("formAction");
+
+    const button = transformJSX(
+      `const Field = () => <button type="submit" formAction="/save">Go</button>;`,
+      "test.tsx",
+    );
+    expect(button.code).toContain("_$createTemplate");
+    expect(button.code).toContain("formAction");
+  });
+
+  it("does not hoist progress with a dynamic value", () => {
+    const code = `const Bar = ({ n }) => <progress value={n} />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("<progress");
+  });
+
+  it("hoists progress with a static value", () => {
+    const code = `const Bar = () => <progress value="0.5" />;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('html: "<progress value=\\"0.5\\"></progress>"');
+  });
+
+  it("does not hoist link, meta, and title that must move into document.head", () => {
+    const link = transformJSX(
+      `const Head = () => <link rel="icon" href="/favicon.ico" />;`,
+      "test.tsx",
+    );
+    expect(link.code).not.toContain("_$createTemplate");
+    expect(link.code).toContain("<link");
+
+    const meta = transformJSX(
+      `const Head = () => <meta name="description" content="hi" />;`,
+      "test.tsx",
+    );
+    expect(meta.code).not.toContain("_$createTemplate");
+
+    const title = transformJSX(
+      `const Head = () => <title>Doc</title>;`,
+      "test.tsx",
+    );
+    expect(title.code).not.toContain("_$createTemplate");
+    expect(title.code).toContain("<title>");
+  });
+
+  it("slots nested title through jsx while hoisting the shell", () => {
+    const code = `const Page = () => <div><title>Doc</title><p>body</p></div>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('html: "<div><!--s:0--><p>body</p></div>"');
+    expect(result.code).toContain("<title>Doc</title>");
+  });
+
+  it("hoists link, meta, and title with itemProp as body microdata", () => {
+    const link = transformJSX(
+      `const Item = () => <link itemProp="url" href="https://example.com" />;`,
+      "test.tsx",
+    );
+    expect(link.code).toContain("_$createTemplate");
+    expect(link.code).toContain("itemProp");
+
+    const meta = transformJSX(
+      `const Item = () => <meta itemProp="name" content="Ada" />;`,
+      "test.tsx",
+    );
+    expect(meta.code).toContain("_$createTemplate");
+
+    const title = transformJSX(
+      `const Item = () => <title itemProp="name">Ada</title>;`,
+      "test.tsx",
+    );
+    expect(title.code).toContain("_$createTemplate");
+  });
+
+  it("does not hoist stylesheet-style or async script special cases", () => {
+    const style = transformJSX(
+      `const Head = () => <style href="/app.css" precedence="default">{".x{}"}</style>;`,
+      "test.tsx",
+    );
+    expect(style.code).not.toContain("_$createTemplate");
+    expect(style.code).toContain("<style");
+
+    const script = transformJSX(
+      `const Head = () => <script async src="/app.js" />;`,
+      "test.tsx",
+    );
+    expect(script.code).not.toContain("_$createTemplate");
+    expect(script.code).toContain("<script");
+  });
+
+  it("hoists style and script when they do not need the enhancer", () => {
+    const styleHref = transformJSX(
+      `const Head = () => <style href="/app.css">{".x{}"}</style>;`,
+      "test.tsx",
+    );
+    expect(styleHref.code).toContain("_$createTemplate");
+
+    const stylePrec = transformJSX(
+      `const Head = () => <style precedence="default">{".x{}"}</style>;`,
+      "test.tsx",
+    );
+    expect(stylePrec.code).toContain("_$createTemplate");
+
+    const scriptSrc = transformJSX(
+      `const Head = () => <script src="/app.js" />;`,
+      "test.tsx",
+    );
+    expect(scriptSrc.code).toContain("_$createTemplate");
+
+    const scriptAsync = transformJSX(
+      `const Head = () => <script async />;`,
+      "test.tsx",
+    );
+    expect(scriptAsync.code).toContain("_$createTemplate");
+  });
+
+  it("treats namespaced attributes as non-matching when checking enhancer props", () => {
+    const code = `const Head = () => <title xml:lang="en">Doc</title>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("<title");
+  });
+
+  it("does not hoist title with a spread even when itemProp is absent", () => {
+    const code = `const Head = (props) => <title {...props}>Doc</title>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("<title");
+  });
+
   it("handles dynamic children with comment markers", () => {
     const code = `const Card = ({ title }) => <div class="card"><h1>{title}</h1></div>;`;
     const result = transformJSX(code, "test.tsx");

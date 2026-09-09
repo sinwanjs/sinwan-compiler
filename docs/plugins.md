@@ -1,6 +1,8 @@
 # Using the compiler from Bun and Vite
 
-App projects should depend on **`bun-plugin-sinwan`** or **`vite-plugin-sinwan`**. Those packages import `sinwan-compiler` and pass the right options. You do not add `sinwan-compiler` unless you customize the pipeline.
+App projects should depend on **`bun-plugin-sinwan`** or **`vite-plugin-sinwan`**. Those packages import `sinwan-compiler` at runtime (`packages: "external"` in their builds) and pass the right options. You do not add `sinwan-compiler` unless you customize the pipeline.
+
+The plugins accept any compiler `>=0.2.5 <1.0.0`. A new compiler release does not need a matching plugin publish. Existing apps update with `bun update sinwan-compiler`.
 
 ## Bun
 

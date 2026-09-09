@@ -19,6 +19,8 @@ bun add -d sinwan-compiler
 
 App templates already depend on the Bun or Vite plugin. You only need this package if you call the compiler yourself.
 
+The plugins declare `sinwan-compiler` as `>=0.2.5 <1.0.0`. After you publish a new 0.x compiler, do **not** bump the plugins. Apps pick it up with a fresh install or `bun update sinwan-compiler`. Republish a plugin only if its own API changed.
+
 ## Production analysis
 
 ```bash

@@ -152,6 +152,78 @@ function cleanJSXText(value: string): string {
   return str;
 }
 
+/** Map JSX prop names to HTML attribute names in hoisted template HTML. */
+function htmlAttributeName(attrName: string): string {
+  if (attrName === "defaultValue") return "value";
+  if (attrName === "defaultChecked") return "checked";
+  return attrName;
+}
+
+function jsxAttrName(
+  attr: t.JSXAttribute | t.JSXSpreadAttribute,
+): string | undefined {
+  if (attr.type !== "JSXAttribute" || attr.name.type !== "JSXIdentifier") {
+    return undefined;
+  }
+  return attr.name.name;
+}
+
+function hasAttr(
+  attributes: t.JSXOpeningElement["attributes"],
+  name: string,
+): boolean {
+  for (const attr of attributes) {
+    if (jsxAttrName(attr) === name) return true;
+  }
+  return false;
+}
+
+function attrIsExpression(
+  attributes: t.JSXOpeningElement["attributes"],
+  name: string,
+): boolean {
+  for (const attr of attributes) {
+    if (attr.type !== "JSXAttribute" || jsxAttrName(attr) !== name) continue;
+    return attr.value?.type === "JSXExpressionContainer";
+  }
+  return false;
+}
+
+/**
+ * Enhanced tags whose special props must go through `jsx()` (refs, head
+ * insertion, function actions). Those nodes become child slots so the
+ * surrounding native shell can still be hoisted.
+ */
+function elementNeedsJsxEnhancer(node: t.JSXElement): boolean {
+  const tagName = jsxNameToString(node.openingElement.name);
+  const attrs = node.openingElement.attributes;
+  switch (tagName) {
+    case "select":
+      return hasAttr(attrs, "defaultValue") || hasAttr(attrs, "value");
+    case "textarea":
+      return hasAttr(attrs, "value");
+    case "option":
+      return hasAttr(attrs, "selected");
+    case "form":
+      return attrIsExpression(attrs, "action");
+    case "input":
+    case "button":
+      return attrIsExpression(attrs, "formAction");
+    case "progress":
+      return attrIsExpression(attrs, "value");
+    case "style":
+      return hasAttr(attrs, "href") && hasAttr(attrs, "precedence");
+    case "script":
+      return hasAttr(attrs, "src") && hasAttr(attrs, "async");
+    case "link":
+    case "meta":
+    case "title":
+      return !hasAttr(attrs, "itemProp");
+    default:
+      return false;
+  }
+}
+
 function extractTemplate(node: any, filename: string): ExtractedTemplate {
   const counter: SlotCounter = { value: 0 };
   const slots: TemplateSlot[] = [];
@@ -252,6 +324,7 @@ function elementToHtml(
   }
   const isVoid = VOID_ELEMENTS.has(tagName);
   let html = `<${tagName}`;
+  let textareaDefault = "";
 
   for (const attr of node.openingElement.attributes) {
     if (attr.type === "JSXSpreadAttribute") {
@@ -273,6 +346,7 @@ function elementToHtml(
       }
       continue;
     }
+    const htmlName = htmlAttributeName(attrName);
     if (attr.value?.type === "JSXExpressionContainer") {
       const expr = attr.value.expression;
       if (expr.type === "JSXEmptyExpression") continue;
@@ -284,7 +358,7 @@ function elementToHtml(
         isStaticStyleValue(expr)
       ) {
         const serialized = serializeStyleValue(expr);
-        html += ` ${attrName}="${escapeHtml(serialized)}"`;
+        html += ` ${htmlName}="${escapeHtml(serialized)}"`;
         continue;
       }
       slots.push({
@@ -293,7 +367,7 @@ function elementToHtml(
         name: attrName,
         expr,
       });
-      html += ` ${attrName}=""`;
+      html += ` ${htmlName}=""`;
       continue;
     }
     if (
@@ -308,9 +382,13 @@ function elementToHtml(
           attr.value.loc?.start?.line,
         );
       }
-      html += ` ${attrName}="${escapeHtml(rawValue)}"`;
+      if (tagName === "textarea" && attrName === "defaultValue") {
+        textareaDefault = escapeHtml(rawValue);
+        continue;
+      }
+      html += ` ${htmlName}="${escapeHtml(rawValue)}"`;
     } else if (!attr.value) {
-      html += ` ${attrName}`;
+      html += ` ${htmlName}`;
     }
   }
 
@@ -326,6 +404,7 @@ function elementToHtml(
     counter,
   );
   html += childResult.html;
+  html += textareaDefault;
 
   html += `</${tagName}>`;
   return html;
@@ -369,7 +448,7 @@ function childrenToHtml(
       const childTag = childName.type === "JSXIdentifier" ? childName.name : "";
       const isFirstCharUpper =
         childTag && childTag.charAt(0) === childTag.charAt(0).toUpperCase();
-      if (isFirstCharUpper) {
+      if (isFirstCharUpper || elementNeedsJsxEnhancer(child)) {
         const slot = nextSlotId(counter);
         slots.push({
           path: [...path, childIndex],
@@ -452,6 +531,7 @@ export function transformJSX(
       if (tagName.type !== "JSXIdentifier") return;
       const name = tagName.name;
       if (!name || name[0] !== name[0].toLowerCase()) return;
+      if (elementNeedsJsxEnhancer(path.node)) return;
 
       try {
         const extracted = extractTemplate(path.node, filename);

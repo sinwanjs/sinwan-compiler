@@ -2,6 +2,23 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.6] — Hoisted Form Defaults & JSX Enhancer Child Slots
+
+sinwan-compiler 0.2.6 maps uncontrolled input defaults to real HTML in hoisted templates, and keeps every `enhanced-elements.ts` special case on the `jsx()` path so compiled trees match the runtime enhancers.
+
+### Fixed
+
+- **Hoisted `defaultValue` / `defaultChecked` (`transform.ts`)**: Hoisted `<input defaultValue="/api/hello" />` copied the JSX prop name into HTML. Browsers ignore `defaultValue` as a content attribute, so the field rendered empty. Static `defaultValue` now serializes as `value`, `defaultChecked` as `checked`, and a static textarea `defaultValue` becomes text content. Dynamic `defaultValue={v}` still emits an attr slot named `defaultValue`; the runtime maps it to the IDL property.
+- **Enhanced tags skipped the `jsx()` enhancers (`transform.ts`)**: Hoisting inlined `select`, function `action` / `formAction`, `option selected`, controlled `textarea` / `progress`, and head tags (`link` / `meta` / `title` / `style` / `script`) as inert HTML. Those props need refs, option selection, or `document.head` insertion. Roots that need an enhancer are no longer hoisted; nested ones become child slots so the native shell can still hoist.
+
+### Changed
+
+- **Template hoisting docs (`docs/transform.md`, `docs/plugins.md`, `README.md`)**: Document enhancer skip/child-slot rules. Plugins declare `sinwan-compiler` as `>=0.2.5 <1.0.0` and import it at runtime, so a 0.x compiler publish does not require a plugin republish; existing apps pick it up with `bun update sinwan-compiler`.
+
+### Internal
+
+- Compiler tests: 219 pass / 0 fail (was 195). `src/` is 100% lines and 100% functions.
+
 ## [0.2.5] — Analyzer Cache Delete Fix, Isolated Tests & Docs Rewrite
 
 sinwan-compiler 0.2.5 fixes stale reactive-prop metadata when a caller file is deleted, stops cache restore from throwing on stale function spans, isolates the test runner to this package, and rewrites the docs to match the current compiler API.

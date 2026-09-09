@@ -113,7 +113,7 @@ Slots:
 
 Static `style` objects and strings are written into the HTML (`backgroundColor` → `background-color`). Quoted style strings that contain `${…}` log a warning in the compiler: use a template literal, `style={\`…${x}\`}`.
 
-Hoisting is skipped (the JSX is left as JSX) when the root is a component, the tag is a member expression (`Icons.Star` as the root), or a spread is on a native element (`<div {...props}>`). In `dev: true`, skipped hoists log a warning.
+Hoisting is skipped (the JSX is left as JSX) when the root is a component, the tag is a member expression (`Icons.Star` as the root), a spread is on a native element (`<div {...props}>`), or the element needs a JSX enhancer (`<select defaultValue>`, function `action`/`formAction`, head tags without `itemProp`, and the other cases in `enhanced-elements.ts`). Nested enhanced tags become child slots so the native shell can still hoist. In `dev: true`, skipped hoists from extract errors log a warning.
 
 Boolean attributes without a value are emitted as HTML flags: `<button disabled>`.
 
