@@ -2,6 +2,26 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.5] — Analyzer Cache Delete Fix, Isolated Tests & Docs Rewrite
+
+sinwan-compiler 0.2.5 fixes stale reactive-prop metadata when a caller file is deleted, stops cache restore from throwing on stale function spans, isolates the test runner to this package, and rewrites the docs to match the current compiler API.
+
+### Fixed
+
+- **Analyzer Cache Remove (`analyze.ts`)**: `AnalyzerCache.remove()` only recomputed files that imported the deleted module. Callers are the files that *pass* props, so a deleted parent left its children marked reactive. Remove now also recomputes modules the deleted file imported, then saves.
+- **Cache Restore on Stale Spans (`analyze.ts`)**: Restoring a cache whose source no longer matched serialized callee spans threw `Failed to restore callee`. `restoreModule` now returns `null` and skips that module; the next `update` rebuilds it.
+- **Package Test Isolation (`scripts/run-tests.ts`)**: `bun test` from this package could pick up other workspace `cli.test.ts` files. `bun run test` now runs only `sinwan-compiler/__tests__` with coverage.
+
+### Changed
+
+- **Documentation**: README and `docs/` now describe auto-`cc`, `useFetch`, `useState` from `sinwan/react`, built-in control-flow wrapping, `ref`/style hoisting, cache remove/restore, import resolve order (tsconfig → bunfig → workspaces → relative), CLI bin `sinwan`, and plugin wiring. Analyzer “Limitations” are documented as conservative rules (unknown spreads, `children` as a prop, exported props reactive without metadata).
+- **CLI Entry (`cli.ts`)**: `runCliIfMain()` is the testable entry; it still runs `runAnalyzeCli()` when the module is the process main.
+
+### Internal
+
+- Compiler tests: 195 pass / 0 fail (was 141). `src/` is 100% lines and 100% functions.
+- CI and Release workflows run `bun run test` instead of bare `bun test`.
+
 ## [0.2.4] — Template Hoisting with Refs, Protocol Drift Fix & Test Expansion
 
 sinwan-compiler 0.2.4 adds support for hoisting JSX elements with `ref` attributes (previously a hard error), fixes a type assertion issue in the template slot protocol, and significantly expands test coverage for compiler transforms.

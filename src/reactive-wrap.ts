@@ -409,7 +409,7 @@ export function getAllPropNames(params: t.Node | undefined): Set<string> {
   return new Set();
 }
 
-function resolveLocalObjectLiteral(
+export function resolveLocalObjectLiteral(
   fn: t.Function,
   name: string,
 ): t.ObjectExpression | null {
@@ -419,9 +419,9 @@ function resolveLocalObjectLiteral(
     if (!t.isVariableDeclaration(stmt)) continue;
     for (const decl of stmt.declarations) {
       if (!t.isIdentifier(decl.id) || decl.id.name !== name) continue;
-      if (decl.init && t.isObjectExpression(decl.init)) {
-        return decl.init;
-      }
+      const init = decl.init;
+      if (!t.isObjectExpression(init)) continue;
+      return init;
     }
   }
   return null;
@@ -699,8 +699,18 @@ export interface ComponentExpressionInfo {
   attributeName: string | null;
 }
 
-function getComponentExpressionInfo(exprPath: any): ComponentExpressionInfo {
-  const parent = exprPath.parentPath;
+export function getComponentExpressionInfo(exprPath: {
+  parentPath?: unknown;
+}): ComponentExpressionInfo {
+  const parent = exprPath.parentPath as
+    | {
+        isJSXAttribute?: () => boolean;
+        isJSXElement?: () => boolean;
+        node: t.Node & { name?: t.Node };
+        parentPath?: { parentPath?: unknown };
+      }
+    | null
+    | undefined;
   if (!parent) {
     return { isComponent: false, componentName: null, attributeName: null };
   }
@@ -756,32 +766,29 @@ function getComponentExpressionInfo(exprPath: any): ComponentExpressionInfo {
 }
 
 function isReactiveComponentProp(
-  info: ComponentExpressionInfo,
+  componentName: string,
+  attributeName: string,
   componentNames: Map<string, t.Function>,
   reactiveProps: Map<t.Function, Set<string>>,
   importedReactiveProps: Map<string, Set<string>>,
 ): boolean {
-  if (!info.isComponent || !info.componentName || !info.attributeName) {
-    return false;
-  }
-
-  if (isBuiltinReactiveProp(info.componentName, info.attributeName)) {
+  if (isBuiltinReactiveProp(componentName, attributeName)) {
     return true;
   }
 
-  const componentFn = componentNames.get(info.componentName);
+  const componentFn = componentNames.get(componentName);
   if (componentFn) {
     const props = reactiveProps.get(componentFn);
     if (!props) return false;
-    return props.has(info.attributeName);
+    return props.has(attributeName);
   }
 
   // Component is imported from another module: consult cross-file metadata
   // resolved from analyzeMetadata. The localName used at the call site maps
   // to the reactive prop set computed for the imported component's export.
-  const importedProps = importedReactiveProps.get(info.componentName);
+  const importedProps = importedReactiveProps.get(componentName);
   if (!importedProps) return false;
-  return importedProps.has(info.attributeName);
+  return importedProps.has(attributeName);
 }
 
 function shouldWrap(expr: t.Expression, scope: ReactiveScope): boolean {
@@ -981,19 +988,6 @@ export function collectComponentFunctions(
         const id = parent.node.id;
         if (t.isIdentifier(id)) {
           names.set(id.name, componentFn);
-        }
-      } else if (
-        parent &&
-        parent.isExportNamedDeclaration &&
-        parent.isExportNamedDeclaration()
-      ) {
-        const declaration = parent.node.declaration;
-        if (t.isVariableDeclaration(declaration)) {
-          for (const decl of declaration.declarations) {
-            if (t.isIdentifier(decl.id)) {
-              names.set(decl.id.name, componentFn);
-            }
-          }
         }
       }
     },
@@ -1338,19 +1332,6 @@ export function wrapReactiveExpressions(
         if (t.isIdentifier(id)) {
           componentNames.set(id.name, componentFn);
         }
-      } else if (
-        parent &&
-        parent.isExportNamedDeclaration &&
-        parent.isExportNamedDeclaration()
-      ) {
-        const declaration = parent.node.declaration;
-        if (t.isVariableDeclaration(declaration)) {
-          for (const decl of declaration.declarations) {
-            if (t.isIdentifier(decl.id)) {
-              componentNames.set(decl.id.name, componentFn);
-            }
-          }
-        }
       }
     },
 
@@ -1531,8 +1512,10 @@ export function wrapReactiveExpressions(
             if (compInfo.attributeName !== null) {
               // Component attribute — wrap only if it is a reactive prop.
               if (
+                !compInfo.componentName ||
                 !isReactiveComponentProp(
-                  compInfo,
+                  compInfo.componentName,
+                  compInfo.attributeName,
                   componentNames,
                   reactiveProps,
                   importedReactiveProps,

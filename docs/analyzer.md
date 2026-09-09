@@ -1,16 +1,18 @@
-# Cross-file reactive-prop analyzer
+# Cross-file analyzer
 
-The analyzer determines which props of an exported component are reactive. It runs over the whole project (or a cached subset) and produces a map of `filePath → exportName → Set<propName>`.
+The analyzer answers: **for each exported component, which props actually change?** The transform uses that map so a static `title="Hello"` does not become an effect.
+
+Result shape: `filePath → exportName → Set<propName>`.
 
 ## How it works
 
-1. **Parse** every `.tsx/.ts/.jsx/.js` file into a Babel AST.
-2. **Track imports** of reactive sources (`createMutable`, `createStore`, `signal`, `computed`, `useState`) and the component factory `cc`.
-3. **Collect component functions** defined with `cc(...)`.
-4. **Build a call graph** of local and imported JSX calls (`<Child ... />`).
-5. **Propagate reactivity** bottom-up through the call graph using a fixed-point algorithm.
+1. Scan `.tsx` / `.ts` / `.jsx` / `.js` (or the files you pass in).
+2. Auto-wrap the same exported components the transform would wrap.
+3. Track reactive imports and `cc(...)`.
+4. Build a call graph: local `<Child />` and imported `<Child />`.
+5. Propagate reactivity until the sets stop growing.
 
-A prop is reactive for a given component if any of its callers passes a value that reads a reactive source.
+A prop is reactive if **any** caller passes a value that reads a reactive source (including through another component).
 
 ## Example
 
@@ -23,10 +25,12 @@ export const Child = cc(({ title }) => <h1>{title}</h1>);
 import { cc } from "sinwan/component";
 import { signal } from "sinwan/reactivity";
 import { Child } from "./Child";
-const Parent = cc(() => <Child title={signal.value} />);
-```
 
-The analyzer produces:
+const Parent = cc(() => {
+  const title = signal("Hello");
+  return <Child title={title.value} />;
+});
+```
 
 ```json
 {
@@ -34,64 +38,71 @@ The analyzer produces:
 }
 ```
 
-## Workspace packages
+If every caller passed `title="Hello"`, `Child` would be `[]` and the transform would not wrap `title` inside `Child`.
 
-Cross-file analysis works for local monorepo packages. The analyzer discovers workspace packages from a `package.json` `workspaces` field, a `pnpm-workspace.yaml`, or explicit package paths. Only packages that are actually imported by the project are analyzed.
+Default exports are stored under the name `"default"`.
+
+## Spreads
+
+The analyzer is precise when it can see the object:
+
+```tsx
+<Child {...{ title: "Hello", count: s.value }} />
+// only `count` is reactive
+
+const props = { title: "Hello", count: s.value };
+<Child {...props} />
+// same, if `props` is that object literal in the same function
+```
+
+String keys work (`{ "title": s.value }`). If the spread is an unknown value (`{...rest}` from parameters), **every known prop of the callee**, including `children`, is marked reactive.
+
+## Import resolution
+
+Lookups run in this order:
+
+1. `tsconfig.json` `paths` (when a config is passed or `tsconfig.json` exists next to `root`)
+2. `bunfig.toml` aliases (`[install] alias = { … }` or `[install.alias]`)
+3. Workspace packages (see below)
+4. Relative imports (`./Child`, `./ui` → `ui.tsx` or `ui/index.tsx`)
+
+You can replace that with `resolve(source, fromFile)`.
+
+`AnalyzerCache` also resolves **in-memory** modules first (HMR can update a file before it hits disk), including `./ui` → `ui/index.tsx` already in the cache.
+
+## Workspaces
+
+Only packages that the app actually imports are pulled in.
 
 ```ts
 analyzeProject({
   root: "./apps/web",
-  // From a workspace file
-  workspaces: "../../package.json",
-  // From a pnpm workspace
-  workspaces: "../../pnpm-workspace.yaml",
-  // Explicit package paths or globs
-  workspaces: ["../../packages/sinwan-ui", "../../packages/shared"],
-  // Or combine both
-  workspaces: {
-    file: "../../package.json",
-    include: ["../../packages/sinwan-ui"],
-  },
+  workspaces: "../../package.json", // npm/bun `workspaces`
+  // or "../../pnpm-workspace.yaml"
+  // or ["../../packages/ui"]
+  // or { file: "../../package.json", include: ["../../packages/ui"] }
 });
 ```
 
-Package imports are resolved to files inside the declared package, typically under the package `src` directory (or the directory of the `source` field in `package.json`). Subpath imports such as `@sinwan/ui/Button` map to `packages/sinwan-ui/src/Button.tsx`.
+`@scope/ui/Button` maps to `packages/ui/src/Button.tsx` (or the directory of `package.json` `"source"`).
 
+## Cache (`AnalyzerCache`)
 
+Dev plugins call `update(file, code)` on each transform. The cache:
 
-## Import resolution
+- Re-analyzes that file
+- Walks importers **and** imported modules
+- Writes `cachePath` when you set one
 
-The analyzer resolves imports in this order:
+`remove(file)` is for deletes / HMR unlinks. It drops the module and **recomputes both**:
 
-1. `tsconfig.json` `paths` (if configured).
-2. `bunfig.toml` aliases (if configured or auto-detected).
-3. Workspace packages (if configured).
-4. Relative imports with the configured extensions.
+- files that imported it (parents)
+- files it imported (children — their props may become static again)
 
-You can also provide a custom resolver:
+If `cachePath` exists, the constructor restores it. Function identities are start/end offsets. If a file changed so those spans no longer match, that module is skipped (no throw); the next `update` rebuilds it.
 
-```ts
-analyzeProject({
-  root: "/project",
-  resolve: (source, fromFile) => {
-    // return absolute path or null
-  },
-});
-```
+## Conservative rules
 
-## Spread props
-
-Spread props are handled precisely when possible:
-
-- `<Child {...{ title: "Hello", count: signal.value }} />` is treated as two named props; only `count` becomes reactive.
-- `<Child {...props} />` is also resolved precisely if `props` is a local variable initialized with an object literal in the same function:
-  ```tsx
-  const props = { title: "Hello", count: signal.value };
-  return <Child {...props} />;
-  ```
-- Spreads of function parameters or other unknown runtime objects fall back to the conservative rule: all known props of the callee are marked reactive.
-
-## Limitations
-
-- Unknown runtime objects (`{...props}` where `props` is not a local object literal) are conservatively treated as reactive.
-- Named slot props and `children` are regular props; they are reactive only when the passed value is reactive.
+- Unknown spreads are conservative (all callee props).
+- `children` is a normal prop.
+- Without metadata, the transform treats **exported** component props as reactive so a parent in another file cannot silently go stale.

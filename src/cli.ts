@@ -50,7 +50,13 @@ export function runAnalyzeCli(args: string[] = process.argv.slice(2)): void {
   console.log(`[sinwan] analyzed ${root} -> ${outFile}`);
 }
 
-// Run immediately when executed as the entry point (not when imported).
-if (import.meta.main) {
-  runAnalyzeCli();
+/** Runs the CLI only when this module is the process entry point. */
+export function runCliIfMain(
+  isMain = import.meta.main,
+  args?: string[],
+): void {
+  if (!isMain) return;
+  runAnalyzeCli(args);
 }
+
+runCliIfMain();

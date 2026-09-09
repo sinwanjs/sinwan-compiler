@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
-import { transformJSX } from "../src/transform";
+import { COMPILER_TEMPLATE_SLOT_PROTOCOL, transformJSX } from "../src/transform";
 import { analyzeProject } from "../src/analyze";
 
 describe("transformJSX", () => {
@@ -321,11 +321,11 @@ describe("transformJSX", () => {
 
   it("serializes static object styles into the HTML", () => {
     const code = `
-      const Box = () => <div style={{ background: "red", width: "100px", padding: 8 }} />;
+      const Box = () => <div style={{ backgroundColor: "red", width: "100px", padding: 8 }} />;
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain(
-      'html: "<div style=\\"background:red;width:100px;padding:8\\"></div>"',
+      'html: "<div style=\\"background-color:red;width:100px;padding:8\\"></div>"',
     );
     expect(result.code).not.toContain('name: "style"');
   });
@@ -1687,5 +1687,374 @@ describe("built-in control-flow direct reactive children", () => {
     // forwarded children stay unwrapped (the child's own JSX handles it)
     expect(result.code).toContain("<Child>{name}</Child>");
     expect(result.code).not.toContain("() => name");
+  });
+});
+
+describe("template protocol and hoist edge cases", () => {
+  it("decodes compiler template slot markers", () => {
+    expect(COMPILER_TEMPLATE_SLOT_PROTOCOL.encodeSlot(3)).toBe("s:3");
+    expect(COMPILER_TEMPLATE_SLOT_PROTOCOL.decodeSlot("s:3")).toBe(3);
+    expect(COMPILER_TEMPLATE_SLOT_PROTOCOL.decodeSlot("s:x")).toBeNull();
+    expect(COMPILER_TEMPLATE_SLOT_PROTOCOL.decodeSlot("nope")).toBeNull();
+  });
+
+  it("keeps a space between multiline JSX text lines", () => {
+    const code = `const Card = () => (
+      <p>
+        hello
+        world
+      </p>
+    );`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("hello world");
+  });
+
+  it("serializes an empty template-literal style", () => {
+    const code = "const Card = () => <div style={``}></div>;";
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('style=\\"\\"');
+  });
+
+  it("emits boolean attributes without a value", () => {
+    const code = `const Btn = () => <button disabled>Go</button>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("<button disabled>");
+  });
+
+  it("skips hoisting when a member-expression child looks like a component", () => {
+    const code = `const App = () => <div><Icons.Star /></div>;`;
+    const result = transformJSX(code, "test.tsx", { dev: true });
+    expect(result.code).toContain("<Icons.Star");
+    expect(result.code).not.toContain("_$createTemplate");
+  });
+
+  it("imports binding helpers when explicitBindings has no hoisted templates", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      const Card = cc(({ title }) => title);
+      export const App = cc(() => {
+        const s = signal(1);
+        return <Card title={s.value} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).not.toContain("_$createTemplate");
+    expect(result.code).toContain("_$bindText");
+    expect(result.code).toContain('from "sinwan/renderer"');
+  });
+});
+
+describe("auto-cc additional candidates", () => {
+  it("wraps an anonymous default-exported function declaration", () => {
+    const code = `export default function () { return <div/>; }`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("export default cc(function");
+  });
+
+  it("does not wrap generator function expressions", () => {
+    const code = `export const App = function* () { return <div/>; };`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("= cc(");
+  });
+
+  it("does not treat a nested function's JSX as the export's return", () => {
+    const code = `
+      export function App() {
+        function Inner() { return <span/>; }
+        return helper;
+      }
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("= cc(");
+  });
+
+  it("wraps a component that returns JSX inside an array", () => {
+    const code = `export function List() { return [[<div key="a" />]]; }`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("export const List = cc(");
+  });
+
+  it("leaves namespaced child tags out of the HTML template", () => {
+    const code = `const Icon = () => <div><svg:rect /></div>;`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$createTemplate");
+  });
+
+  it("wraps a component that returns JSX inside an object", () => {
+    const code = `export function Node() { return { el: <div/> }; }`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("export const Node = cc(");
+  });
+
+  it("does not wrap an arrow whose body is only a nested function", () => {
+    const code = `export const App = () => (() => <div/>);`;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("= cc(");
+  });
+});
+
+describe("additional reactive wrap paths", () => {
+  it("wraps createStore and computed reads", () => {
+    const storeCode = `
+      import { cc } from "sinwan/component";
+      import { createStore } from "sinwan/store";
+      export const App = cc(() => {
+        const [state] = createStore({ n: 1 });
+        return <p>{state.n}</p>;
+      });
+    `;
+    const storeResult = transformJSX(storeCode, "test.tsx");
+    expect(storeResult.code).toContain("() => state.n");
+
+    const computedCode = `
+      import { cc } from "sinwan/component";
+      import { signal, computed } from "sinwan/reactivity";
+      export const App = cc(() => {
+        const s = signal(1);
+        const doubled = computed(() => s.value * 2);
+        return <p>{doubled.value}</p>;
+      });
+    `;
+    const computedResult = transformJSX(computedCode, "test.tsx");
+    expect(computedResult.code).toContain("() => doubled.value");
+  });
+
+  it("does not treat a non-chain useFetch method as a fetch shell", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { useFetch } from "sinwan/hook";
+      export const App = cc(() => {
+        const aborted = useFetch("/api").abort();
+        return <p>{aborted}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("() => aborted");
+  });
+
+  it("does not wrap member access on a local getter function", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { useState } from "sinwan/react";
+      export const App = cc(() => {
+        const [count] = useState(0);
+        function doubled() { return count(); }
+        return <p>{doubled.name}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("() => doubled.name");
+  });
+
+  it("wraps calls to a local function declaration that reads reactive state", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { useState } from "sinwan/react";
+      export const App = cc(() => {
+        const [count] = useState(0);
+        function doubled() { return count(); }
+        return <p>{doubled()}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("() => doubled()");
+  });
+
+  it("treats rest-parameter components as having no named props", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const App = cc((...args) => <div>{args[0]}</div>);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("args[0]");
+  });
+
+  it("tracks string-literal keys in object spreads", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      const Child = cc(({ title }) => <h1>{title}</h1>);
+      export const App = cc(() => {
+        const s = signal("Hi");
+        return <Child {...{ "title": s.value }} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("<Child");
+  });
+
+  it("resolves a local object-literal variable in a same-file spread", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      const Child = cc(({ title }) => <h1>{title}</h1>);
+      export const App = cc(() => {
+        const s = signal("Hi");
+        const props = { title: s.value };
+        return <Child {...props} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("{...props}");
+  });
+
+  it("wraps non-null asserted destructured mutable values", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { createMutable } from "sinwan/store";
+      export const App = cc(() => {
+        const state = createMutable({ name: "Ada" });
+        const { name } = state;
+        return <p>{name!}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("() => name!");
+  });
+
+  it("does not wrap a useFetch property that is not .value", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { useFetch } from "sinwan/hook";
+      export const App = cc(() => {
+        const f = useFetch("/api");
+        return <p>{f.data}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("() => f.data");
+  });
+
+  it("wraps useFetch .value reads passed to another component", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { useFetch } from "sinwan/hook";
+      const Child = cc(({ title }) => <h1>{title}</h1>);
+      export const App = cc(() => {
+        const f = useFetch<{ title: string }>("/api");
+        return <Child title={f.data.value} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("title={() => f.data.value}");
+  });
+
+  it("does not look inside nested functions when checking a prop value", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      const Child = cc(({ title }) => <h1>{title}</h1>);
+      export const App = cc(() => {
+        const s = signal("Hi");
+        return <Child title={() => s.value} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("title={() => s.value}");
+    expect(result.code).not.toContain("title={() => () =>");
+  });
+
+  it("wraps reactive children inside a fragment", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      export const App = cc(() => {
+        const s = signal(1);
+        return <div>{<>{s.value}</>}</div>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("() => s.value");
+  });
+
+  it("resolves member-expression component names", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      const Mod = { Show: (_props) => null };
+      export const App = cc(() => {
+        const s = signal(true);
+        return <Mod.Show when={s.value}>x</Mod.Show>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("<Mod.Show");
+  });
+
+  it("unwraps non-null asserted prop member access", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Child = cc(({ user }) => {
+        return <p>{user!.name}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$unwrap(user)");
+  });
+
+  it("reuses an existing unwrap import", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { unwrap } from "sinwan/reactivity";
+      export const Child = cc(({ user }) => {
+        void unwrap;
+        return <p>{user.name}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$unwrap(user)");
+    expect(result.code).toContain("unwrap");
+  });
+
+  it("ignores invalid analyze metadata files", () => {
+    const tmp = path.join(import.meta.dir, ".tmp-bad-analyze.json");
+    fs.writeFileSync(tmp, "{not-json");
+    try {
+      const code = `
+        import { cc } from "sinwan/component";
+        import { signal } from "sinwan/reactivity";
+        export const App = cc(() => {
+          const s = signal(1);
+          return <p>{s.value}</p>;
+        });
+      `;
+      const result = transformJSX(code, "test.tsx", {
+        analyze: tmp,
+      });
+      expect(result.code).toContain("() => s.value");
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  });
+
+  it("tracks multiple expression children and empty JSX comments", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      const Child = cc(({ children }) => <div>{children}</div>);
+      export const App = cc(() => {
+        const a = signal(1);
+        const b = signal(2);
+        return <Child>{/* skip */}{a.value}{b.value}</Child>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("{a.value}{b.value}");
+  });
+
+  it("treats export default of a cc() variable as exported", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      const App = cc(({ title }) => <h1>{title}</h1>);
+      export default App;
+      export const Page = cc(() => {
+        const s = signal("Hi");
+        return <App title={s.value} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("title={() => s.value}");
   });
 });

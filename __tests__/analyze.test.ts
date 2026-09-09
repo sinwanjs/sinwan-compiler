@@ -2,7 +2,14 @@ import { describe, it, expect } from "bun:test";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { analyzeProject, analyzeModule } from "../src/analyze";
+import {
+  analyzeProject,
+  analyzeModule,
+  loadMetadata,
+  loadWorkspacePackages,
+} from "../src/analyze";
+import { getAllPropNames } from "../src/reactive-wrap";
+import * as t from "@babel/types";
 
 function resolve(files: Record<string, string>) {
   return (source: string, fromFile: string) => {
@@ -502,5 +509,109 @@ describe("analyzeProject", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("resolves relative imports from disk", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sinwan-relative-"));
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, "Child.tsx"),
+        `
+        import { cc } from "sinwan/component";
+        export const Child = cc(({ title }) => {
+          return <h1>{title}</h1>;
+        });
+      `,
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "Parent.tsx"),
+        `
+        import { cc } from "sinwan/component";
+        import { Child } from "./Child";
+        const Parent = cc(() => {
+          return <Child title="Hello" />;
+        });
+      `,
+      );
+      const project = analyzeProject({ root: tmpDir });
+      const childProps = project.reactiveProps
+        .get(path.join(tmpDir, "Child.tsx"))
+        ?.get("Child");
+      expect(childProps).toEqual(new Set());
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("records same-file component call graphs", () => {
+    const mod = analyzeModule(
+      `
+        import { cc } from "sinwan/component";
+        const Child = cc(({ title }) => <h1>{title}</h1>);
+        export const App = cc(() => <Child title="Hi" />);
+      `,
+      "/project/App.tsx",
+    );
+    expect(mod.localCallGraph.size).toBeGreaterThan(0);
+  });
+});
+
+describe("loadMetadata", () => {
+  it("returns an empty map when the file is missing", () => {
+    expect(loadMetadata("/tmp/does-not-exist-sinwan-meta.json").size).toBe(0);
+  });
+
+  it("reads a metadata file", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sinwan-meta-"));
+    try {
+      const file = path.join(tmpDir, "props.json");
+      fs.writeFileSync(
+        file,
+        JSON.stringify({ "/app/Child.tsx": { Child: ["title"] } }),
+      );
+      const meta = loadMetadata(file);
+      expect(meta.get("/app/Child.tsx")?.get("Child")).toEqual(
+        new Set(["title"]),
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loadWorkspacePackages", () => {
+  it("reads a workspace file and extra include paths", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sinwan-ws-obj-"));
+    try {
+      fs.mkdirSync(path.join(tmpDir, "pkg"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ workspaces: ["pkg"] }),
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "pkg", "package.json"),
+        JSON.stringify({ name: "pkg", version: "1.0.0" }),
+      );
+      const packages = loadWorkspacePackages(
+        {
+          file: path.join(tmpDir, "package.json"),
+          include: [path.join(tmpDir, "pkg")],
+        },
+        tmpDir,
+      );
+      expect(packages.length).toBeGreaterThan(0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("getAllPropNames", () => {
+  it("returns an empty set for unsupported parameter shapes", () => {
+    expect(getAllPropNames(undefined).size).toBe(0);
+    expect(getAllPropNames(t.identifier("props"))).toEqual(new Set(["*"]));
+    expect(getAllPropNames(t.arrayPattern([t.identifier("x")]))).toEqual(
+      new Set(),
+    );
   });
 });

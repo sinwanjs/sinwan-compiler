@@ -1,27 +1,50 @@
 # sinwan-compiler
 
-Shared compiler core for the SinwanJS framework. Provides the JSX transform, the project-wide reactive-prop analyzer, and the dev/HMR cache used by both the Bun and Vite plugins.
+Shared compiler for [Sinwan](https://sinwanjs.com). App code usually never imports this package: **`bun-plugin-sinwan`** and **`vite-plugin-sinwan`** call it for you.
 
-## Documentation
+Use this package directly when you write a plugin, run a production analysis pass, or want to understand what the compiler changes in your JSX.
 
-See the [`docs/`](docs/) folder:
+## What it does
 
-- [Overview](docs/README.md)
-- [Analyzer](docs/analyzer.md)
-- [Transform](docs/transform.md)
-- [CLI](docs/cli.md)
-- [Plugins](docs/plugins.md)
-- [API reference](docs/api.md)
-- [Architecture](docs/architecture.md)
+- **Transforms JSX** so reactive reads become lazy getters the runtime can track.
+- **Hoists static markup** into reusable templates (including `ref` slots).
+- **Wraps exported function components** with `cc()` when they look like components.
+- **Analyzes the project** so static props stay static and only truly reactive props pay for an effect.
 
-## Quick start
+## Install
+
+```bash
+bun add -d sinwan-compiler
+```
+
+App templates already depend on the Bun or Vite plugin. You only need this package if you call the compiler yourself.
+
+## Production analysis
 
 ```bash
 bunx sinwan-compiler analyze ./src ./.sinwan/reactive-props.json
 ```
 
-## Installation
+Then point the plugin at that file:
 
-```bash
-bun add -d sinwan-compiler
+```ts
+sinwan({ analyze: "./.sinwan/reactive-props.json" });
 ```
+
+In development the plugins keep an incremental `AnalyzerCache` instead. You do not need to run the CLI for `bun run dev` / `vite`.
+
+## Documentation
+
+| Guide | Topic |
+| ----- | ----- |
+| [Overview](docs/README.md) | How the pieces fit together |
+| [Transform](docs/transform.md) | Wrapping rules, auto-`cc`, template hoisting |
+| [Analyzer](docs/analyzer.md) | Cross-file reactive props, workspaces, cache |
+| [CLI](docs/cli.md) | `analyze` command |
+| [Plugins](docs/plugins.md) | Bun and Vite options |
+| [API](docs/api.md) | Public TypeScript API |
+| [Architecture](docs/architecture.md) | Internals for contributors |
+
+## License
+
+MIT

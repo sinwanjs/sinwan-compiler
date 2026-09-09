@@ -1,26 +1,45 @@
-# sinwan-compiler
+# Compiler overview
 
-The shared compiler package for SinwanJS. It provides the JSX transform, the project-wide reactive-prop analyzer, and the dev/HMR cache used by both the Bun and Vite plugins.
+`sinwan-compiler` is the shared engine behind the Bun and Vite plugins. It has three jobs: rewrite JSX, decide which props are reactive, and keep that decision cheap in dev.
 
-## What it does
+If you are building a Sinwan app, start with [Plugins](plugins.md). If you are changing the compiler, start with [Architecture](architecture.md).
 
-- **JSX transform**: Converts reactive JSX expressions into lazy zero-arity functions so the Sinwan runtime can update the DOM efficiently.
-- **Cross-file analysis**: Determines which component props are reactive across the whole project, allowing the transform to avoid wrapping static props in effects.
-- **Dev cache**: Maintains an incremental, persistent cache for Bun and Vite so dev startup and HMR are fast.
+## Pipeline
 
-## Packages
+1. **Auto-`cc`** — exported functions that look like components (`App`, `Card`, …) are wrapped with `cc(...)` so the rest of the pipeline sees the same components the runtime will.
+2. **Reactive wrap** — JSX expressions that read signals, stores, `useState`, or `useFetch` become `() => …` (or explicit binding helpers when that mode is on).
+3. **Template hoist** — static native-element trees become `_$createTemplate(...)` calls with slots for dynamic bits (`child`, `attr`, `event`, `ref`).
+4. **Analyze (optional)** — a project-wide pass marks which *exported* component props are actually reactive, so static strings are not wrapped.
 
-- `src/transform.ts` — JSX transform and reactive expression wrapping.
-- `src/analyze.ts` — `analyze`, `analyzeProject`, `AnalyzerCache`, and import resolution.
-- `src/reactive-wrap.ts` — Helpers for detecting reactive sources, collecting component call graphs, and propagating reactivity.
-- `src/cli.ts` — `sinwan-compiler analyze` CLI.
-- `src/index.ts` — Public package exports.
+```text
+source.tsx
+    │
+    ▼
+autoWrapComponents()     plain `export function App()` → cc(App)
+    │
+    ▼
+wrapReactiveExpressions()   {count.value} → {() => count.value}
+    │
+    ▼
+hoist templates             <div class="card">…</div> → _$tmpl_N
+    │
+    ▼
+generated module
+```
 
-## Documentation
+## When analysis runs
 
-- [`analyzer.md`](analyzer.md) — Cross-file reactive-prop analyzer and cache.
-- [`transform.md`](transform.md) — JSX transform and wrapping rules.
-- [`cli.md`](cli.md) — Command-line usage.
-- [`plugins.md`](plugins.md) — Using the compiler with Bun and Vite.
-- [`api.md`](api.md) — Public API reference.
-- [`architecture.md`](architecture.md) — Internal design and data flow.
+| Mode | Who runs it | What the transform receives |
+| ---- | ----------- | --------------------------- |
+| Dev | Plugin `AnalyzerCache` | In-memory `analyzeMetadata` after each file update |
+| Production | CLI / `analyze()` | JSON file via `analyze: "./.sinwan/reactive-props.json"` |
+| Off | Nobody | Conservative wrapping (exported props treated as reactive) |
+
+## Guides
+
+- [Transform](transform.md) — what gets wrapped, auto-`cc`, hoisting, built-in components
+- [Analyzer](analyzer.md) — call graph, spreads, workspaces, cache
+- [CLI](cli.md) — `sinwan analyze`
+- [Plugins](plugins.md) — wiring Bun and Vite
+- [API](api.md) — exported functions and types
+- [Architecture](architecture.md) — data structures and propagation

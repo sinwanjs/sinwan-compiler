@@ -249,18 +249,17 @@ function restoreModule(
     if (!ref) return null;
     const callerFn = findFunctionByRef(ast, ref);
     if (!callerFn) return null;
-    localCallGraph.set(
-      callerFn,
-      sites.map((s) => {
-        const callee = findFunctionByRef(ast, s.callee);
-        if (!callee) throw new Error("Failed to restore callee");
-        return {
-          callee,
-          props: s.props,
-          spreads: s.spreads,
-        };
-      }),
-    );
+    const restored: CallSite[] = [];
+    for (const s of sites) {
+      const callee = findFunctionByRef(ast, s.callee);
+      if (!callee) return null;
+      restored.push({
+        callee,
+        props: s.props,
+        spreads: s.spreads,
+      });
+    }
+    localCallGraph.set(callerFn, restored);
   }
 
   const importedCallSites: ImportedCallSite[] = [];
@@ -1093,11 +1092,17 @@ export class AnalyzerCache {
 
   remove(filePath: string): void {
     const oldMod = this.modules.get(filePath);
-    const affectedImporters = new Set(this.importers.get(filePath) ?? []);
+    const affected = new Set(this.importers.get(filePath) ?? []);
+    if (oldMod) {
+      for (const site of oldMod.importedCallSites) {
+        const resolved = this.resolve(site.source, oldMod.filePath);
+        if (resolved) affected.add(resolved);
+      }
+    }
     this.modules.delete(filePath);
     this.importers.delete(filePath);
     if (oldMod) this.removeImporters(oldMod);
-    this.recomputeFor(affectedImporters);
+    this.recomputeFor(affected);
     this.save();
   }
 
@@ -1260,40 +1265,6 @@ export class AnalyzerCache {
         this.reactiveProps.set(filePath, map);
       }
     }
-  }
-
-  private recompute(): void {
-    const affected = this.collectAffected(Array.from(this.modules.keys()));
-    const subgraphModules = new Map<string, ModuleAnalysis>();
-    for (const filePath of affected) {
-      const mod = this.modules.get(filePath);
-      if (mod) subgraphModules.set(filePath, mod);
-    }
-
-    const globalLocalScopes = new Map<t.Function, ReactiveScope>();
-    const globalCallGraph = new Map<t.Function, CallSite[]>();
-    const globalComponentFunctions = new Set<t.Function>();
-    for (const mod of subgraphModules.values()) {
-      for (const [fn, scope] of mod.localScopes) {
-        globalLocalScopes.set(fn, scope);
-      }
-      for (const fn of mod.componentFunctions) {
-        globalComponentFunctions.add(fn);
-      }
-      for (const [callerFn, sites] of mod.localCallGraph) {
-        const list = globalCallGraph.get(callerFn) ?? [];
-        list.push(...sites);
-        globalCallGraph.set(callerFn, list);
-      }
-    }
-
-    this.reactiveProps = buildProjectReactiveProps(
-      subgraphModules,
-      this.resolve,
-      globalLocalScopes,
-      globalCallGraph,
-      globalComponentFunctions,
-    );
   }
 }
 

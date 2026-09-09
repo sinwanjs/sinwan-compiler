@@ -1,64 +1,139 @@
 # JSX transform
 
-The transform rewrites JSX so the Sinwan runtime can wrap reactive reads in effects at render time.
+`transformJSX(code, filename, options?)` rewrites one module so the Sinwan runtime can track reactive reads and reuse static markup.
 
-## Reactive wrapping
+You normally get this through a plugin. Call it yourself only in tests or custom tooling.
 
-The compiler wraps expressions that read reactive values in zero-arity arrow functions. For example:
-
-```tsx
-<p>{state.name}</p>
-```
-
-becomes:
+## Quick example
 
 ```tsx
-<p>{() => state.name}</p>
+import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+
+export const Counter = cc(() => {
+  const count = signal(0);
+  return <p>{count.value}</p>;
+});
 ```
 
-The runtime calls these functions inside an effect so the DOM updates when the value changes.
-
-## What is reactive
-
-The compiler recognizes values from:
-
-- `createMutable` / `createStore` from `sinwan/store`
-- `signal` / `computed` from `sinwan/reactivity`
-- `useState` from `sinwan/react-client`
-
-Reactive reads include:
-
-- Member expressions: `state.name`, `signal.value`
-- Function calls: `getCount()`
-- Derived expressions: `count() + 1`
-
-## What is NOT wrapped
-
-- Plain literals: `"Hello"`, `123`
-- Event handlers: `onClick={handleClick}`
-- Static bindings that the analyzer proved are non-reactive
-
-## Cross-file optimization
-
-When the analyzer is enabled, the transform can skip wrapping a prop if the analyzer determined that all callers pass a static value. This reduces runtime overhead.
+The compiler turns the child into a lazy getter:
 
 ```tsx
-// Without analyzer: onClick={handleClick} is safe to skip wrapping
-// With analyzer: title="Hello" is also known static, so it is skipped
-<Child title="Hello" onClick={handleClick} />
+<p>{() => count.value}</p>
 ```
+
+The runtime runs that function inside an effect and updates the text when `count` changes.
+
+## Automatic `cc()` wrapping
+
+Exported functions that look like components are wrapped for you. You can write React-style components and still get a Sinwan instance and `displayName`.
+
+A candidate must be:
+
+- **Exported** (named or default)
+- **Uppercase** (or an anonymous `export default function ()`)
+- **0 or 1 parameter**
+- **Returning JSX** in that function (not only in a nested helper)
+- **Not already** `cc(...)` (or a local alias of `cc`)
+
+```tsx
+export function App() {
+  return <h1>Hello</h1>;
+}
+
+// becomes
+import { cc } from "sinwan/component";
+export const App = cc(function App() {
+  return <h1>Hello</h1>;
+});
+```
+
+Not wrapped: lowercase helpers, generators, multi-argument functions, or functions that never return JSX. If `cc` is not imported yet, the compiler adds `import { cc } from "sinwan/component"`.
+
+`cc` may be imported from `sinwan` or `sinwan/component`.
+
+## What counts as reactive
+
+Tracked imports:
+
+| Module | Names |
+| ------ | ----- |
+| `sinwan/store` | `createMutable`, `createStore` |
+| `sinwan/reactivity` | `signal`, `computed` |
+| `sinwan/react` | `useState` |
+| `sinwan/hook` | `useFetch` |
+
+Reads the compiler wraps:
+
+- Store / mutable fields: `state.name`, destructured `const { name } = state`
+- Signals and computeds: `count.value`, including `count.value?.n` and `count.value!.n`
+- `useState` getters: `count()`
+- `useFetch` signal values: `f.data.value` (not the shell `f` or `f.data`)
+- Calls to a **local** function whose body reads one of the above
+
+Not wrapped:
+
+- Literals and plain identifiers
+- Event-handler functions (`onClick={fn}` or `onClick={() => …}`)
+- Nested function *values* passed as props (`title={() => s.value}` stays a render prop)
+- `useFetch` methods such as `abort` / `execute`
+- Static values the [analyzer](analyzer.md) proved never change
+
+## DOM vs component JSX
+
+**Native elements** (`div`, `p`, `button`, …): wrap reactive children and attributes.
+
+**User components** (`<Child title={…} />`): wrap a prop only if that prop is reactive for `Child` (local call graph, analyzer metadata, or a conservative fallback for exported components). Children forwarded to a user component stay unwrapped so the child can read `children` itself.
+
+**Built-in control-flow** components wrap specific props, and they *do* wrap reactive expression children (those children render directly):
+
+| Component | Reactive props |
+| --------- | -------------- |
+| `For`, `Index`, `Virtual` | `each` |
+| `Show`, `Switch`, `Match`, `Key` | `when` |
+| `Dynamic` | `component` |
+| `Visible` | `when`, `style` |
+| `Portal` | `mount` |
+| `Activity` | `mode` |
+
+`Suspense` is not in this list; its props are left alone.
+
+## Template hoisting
+
+Static native trees become a module-level template plus `_$createTemplate(tmpl, [dynamic…])`.
+
+Slots:
+
+| Type | When |
+| ---- | ---- |
+| `child` | `{expr}`, or a capitalized child component |
+| `attr` | Dynamic attribute (not `on*`) |
+| `event` | `onClick={…}` and other `on*` handlers |
+| `ref` | `ref={fn}` or `ref={object}` |
+
+Static `style` objects and strings are written into the HTML (`backgroundColor` → `background-color`). Quoted style strings that contain `${…}` log a warning in the compiler: use a template literal, `style={\`…${x}\`}`.
+
+Hoisting is skipped (the JSX is left as JSX) when the root is a component, the tag is a member expression (`Icons.Star` as the root), or a spread is on a native element (`<div {...props}>`). In `dev: true`, skipped hoists log a warning.
+
+Boolean attributes without a value are emitted as HTML flags: `<button disabled>`.
+
+The slot marker format is `COMPILER_TEMPLATE_SLOT_PROTOCOL` (`s:0`, `s:1`, …). It must stay aligned with the runtime protocol in `sinwan`.
 
 ## Options
 
 ```ts
-transformJSX(code, filename, {
-  hoist: true,              // template hoisting
-  explicitBindings: false,  // emit compiler-driven binding descriptors
-  analyze: "path/to/reactive-props.json", // production metadata
-  analyzeMetadata: cache?.reactiveProps,  // dev cache metadata
+transformJSX(code, "src/App.tsx", {
+  hoist: true, // default true
+  dev: false, // warn when hoisting is skipped
+  explicitBindings: false, // emit _$bindText / _$bindAttr / …
+  analyze: "./.sinwan/reactive-props.json",
+  analyzeMetadata: cache.reactiveProps,
+  resolveImport: (source, fromFile) => absolutePathOrNull,
 });
 ```
 
-## Template hoisting
+- **`analyze` / `analyzeMetadata`** — cross-file reactive props. Invalid JSON is ignored (transform still succeeds).
+- **`resolveImport`** — maps `./Child` to an absolute file so imported components can use analyzer metadata. Without it, imported call sites are not wrapped at the parent.
+- **`explicitBindings`** — wrap with `_$bindText` / `_$bindAttr` / `_$bindStyle` / `_$bindClass` from `sinwan/renderer` instead of a bare `() => …`.
 
-Static JSX subtrees are hoisted into a top-level template factory so they are not recreated on every render.
+Returns `{ code, map }` with a source map.

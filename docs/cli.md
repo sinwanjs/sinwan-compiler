@@ -1,46 +1,53 @@
 # CLI
 
-The `sinwan-compiler` package ships a small CLI for production analysis.
+Production analysis is a single command. Dev servers do not need it; plugins keep a live cache.
 
-## Command
+The published binary name is `sinwan` (see `package.json` `"bin"`). After install you can also run the package name:
 
 ```bash
 bunx sinwan-compiler analyze [root] [outFile] [options]
+# same after a local install:
+sinwan analyze [root] [outFile] [options]
 ```
 
-- `root` — project root to scan (default: current working directory).
-- `outFile` — path for the output JSON (default: `<root>/.sinwan/reactive-props.json`).
+| Argument | Default |
+| -------- | ------- |
+| `root` | Current working directory |
+| `outFile` | `<root>/.sinwan/reactive-props.json` |
 
-## Options
+| Flag | Meaning |
+| ---- | ------- |
+| `--tsconfig`, `-t` | `tsconfig.json` for `paths` |
+| `--bunfig`, `-b` | `bunfig.toml` for Bun aliases |
+| `--workspaces`, `-w` | `package.json`, `pnpm-workspace.yaml`, or a package directory |
 
-| Flag                 | Description                                                                       |
-| -------------------- | --------------------------------------------------------------------------------- |
-| `--tsconfig`, `-t`   | Path to `tsconfig.json` for path alias resolution.                                |
-| `--bunfig`, `-b`     | Path to `bunfig.toml` for Bun alias resolution.                                   |
-| `--workspaces`, `-w` | Path to a `package.json` or `pnpm-workspace.yaml` to discover workspace packages. |
+Anything other than `analyze` prints a short usage line and exits with code `1`.
 
 ## Example
 
 ```bash
-bunx sinwan-compiler analyze ./src ./.sinwan/reactive-props.json --tsconfig ./tsconfig.json --workspaces ../../package.json
+bunx sinwan-compiler analyze ./src ./.sinwan/reactive-props.json \
+  --tsconfig ./tsconfig.json \
+  --workspaces ../../package.json
 ```
 
-## Output format
+## Output
 
-The CLI writes a JSON file mapping each source file to its exported component names and their reactive props:
+JSON: absolute file path → export name → reactive prop names.
 
 ```json
 {
   "/project/src/Child.tsx": {
-    "Child": ["title"]
+    "Child": ["title"],
+    "default": ["label"]
   }
 }
 ```
 
-## Use in plugins
-
-Pass the generated JSON to the Bun or Vite plugin via the `analyze` option:
+Pass that file to a plugin:
 
 ```ts
 sinwan({ analyze: "./.sinwan/reactive-props.json" });
 ```
+
+Programmatic equivalent: `analyze({ root, outFile, tsConfigPath, bunfigPath, workspaces })` from [API](api.md).

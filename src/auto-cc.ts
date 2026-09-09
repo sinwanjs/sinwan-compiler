@@ -72,15 +72,13 @@ function containsJsx(node: any, enterFunctions: boolean): boolean {
     if (EXCLUDE_KEYS.has(key)) continue;
     const val = (node as any)[key];
     if (Array.isArray(val)) {
-      for (const item of val) {
-        if (
-          item &&
+      const foundInArray = val.some(
+        (item) =>
+          Boolean(item) &&
           typeof item === "object" &&
-          containsJsx(item, enterFunctions)
-        ) {
-          return true;
-        }
-      }
+          containsJsx(item, enterFunctions),
+      );
+      if (foundInArray) return true;
     } else if (
       val &&
       typeof val === "object" &&
@@ -172,15 +170,12 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
   const ccName = aliases.values().next().value as string | undefined;
   let changed = false;
 
-  const wrapIfCandidate = (
-    fnPath: any,
-    name: string | null,
-  ): "wrapped" | "skip" | "not-candidate" => {
-    if (name !== null && !isComponentName(name)) return "not-candidate";
-    const fn = fnPath.node as t.Function;
-    if (!isComponentArity(fn)) return "not-candidate";
-    if (!functionReturnsJsx(fnPath)) return "not-candidate";
-    return "wrapped";
+  const wrapIfCandidate = (fnPath: unknown, name: string | null): boolean => {
+    if (name !== null && !isComponentName(name)) return false;
+    const fn = (fnPath as { node: t.Function }).node;
+    if (!isComponentArity(fn)) return false;
+    if (!functionReturnsJsx(fnPath)) return false;
+    return true;
   };
 
   traverse(ast, {
@@ -191,10 +186,8 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
       // export function Foo() {...}  ->  export const Foo = cc(function Foo() {...});
       if (t.isFunctionDeclaration(decl) && decl.id) {
         const name = decl.id.name;
-        if (!isComponentName(name)) return;
         const fnPath = path.get("declaration");
-        if (!isComponentArity(decl)) return;
-        if (!functionReturnsJsx(fnPath)) return;
+        if (!wrapIfCandidate(fnPath, name)) return;
         const fnExpr = t.functionExpression(
           decl.id,
           decl.params,
@@ -230,8 +223,7 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
           }
           if (!t.isFunction(init)) continue;
           const initPath = dPath.get("init");
-          if (!isComponentArity(init)) continue;
-          if (!functionReturnsJsx(initPath)) continue;
+          if (!wrapIfCandidate(initPath, id.name)) continue;
           dPath.node.init = ccCall(init, ccName ?? "cc");
           changed = true;
         }
@@ -246,10 +238,8 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
       //   -> function Foo() {...}; export default cc(Foo);  (preserves binding)
       if (t.isFunctionDeclaration(decl) && decl.id) {
         const name = decl.id.name;
-        if (!isComponentName(name)) return;
         const fnPath = path.get("declaration");
-        if (!isComponentArity(decl)) return;
-        if (!functionReturnsJsx(fnPath)) return;
+        if (!wrapIfCandidate(fnPath, name)) return;
         const fnDecl = t.functionDeclaration(
           decl.id,
           decl.params,
@@ -268,8 +258,7 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
       // export default function() {...}  ->  export default cc(function() {...})
       if (t.isFunctionDeclaration(decl) && !decl.id) {
         const fnPath = path.get("declaration");
-        if (!isComponentArity(decl)) return;
-        if (!functionReturnsJsx(fnPath)) return;
+        if (!wrapIfCandidate(fnPath, null)) return;
         const fnExpr = t.functionExpression(
           null,
           decl.params,
@@ -285,8 +274,7 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
       // export default () => <div/>  /  export default function() {...} (expression form)
       if (t.isArrowFunctionExpression(decl) || t.isFunctionExpression(decl)) {
         const declPath = path.get("declaration");
-        if (!isComponentArity(decl)) return;
-        if (!functionReturnsJsx(declPath)) return;
+        if (!wrapIfCandidate(declPath, null)) return;
         path.node.declaration = ccCall(decl, ccName ?? "cc");
         changed = true;
         return;

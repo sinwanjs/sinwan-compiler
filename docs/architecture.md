@@ -1,75 +1,78 @@
 # Architecture
 
-## File layout
+This page is for people changing the compiler. App authors can stay on [Transform](transform.md) and [Plugins](plugins.md).
+
+## Layout
 
 ```
 src/
-  index.ts          Public exports
-  transform.ts      JSX transform and template hoisting
-  reactive-wrap.ts  Reactive source detection, call graph, propagation
-  analyze.ts        Cross-file analyzer, cache, import resolution, CLI
-  cli.ts            CLI entry point
+  index.ts           Public exports
+  auto-cc.ts         Exported function → cc(...)
+  reactive-wrap.ts   Imports, scopes, call graph, wrap
+  transform.ts       Hoist + transformJSX
+  analyze.ts         Project scan, resolution, AnalyzerCache
+  cli.ts             analyze CLI
+  exports.ts         collectExportedComponents
 ```
 
 ## Data flow
 
-1. **Transform**: receives source code and optional reactive-prop metadata.
-2. **Analyzer (dev)**: builds `AnalyzerCache` incrementally as files are transformed.
-3. **Analyzer (production)**: `analyzeProject()` scans the whole project and writes metadata.
-4. **Propagation**: `propagateReactiveProps()` runs a fixed-point algorithm over the call graph.
+```text
+transformJSX
+  autoWrapComponents
+  wrapReactiveExpressions   ← analyze / analyzeMetadata / resolveImport
+  hoist JSXElement roots    ← _$createTemplate + slots
 
-## Key data structures
-
-### `CallSite`
-
-```ts
-{
-  callee: t.Function;
-  props: { name: string; value: t.Expression }[];
-  spreads: t.Expression[];
-}
+analyze / AnalyzerCache.update
+  autoWrapComponents
+  analyzeModule             ← scopes + local + imported call sites
+  buildProjectReactiveProps
+  propagateReactiveProps
 ```
 
-`spreads` stores the spread expressions. Object-literal spreads are analyzed precisely; unknown spreads are treated conservatively.
+Dev plugins call `cache.update` on each file, then pass `cache.reactiveProps` into `transformJSX` as `analyzeMetadata`. Production writes the same map to JSON (`analyze`) and the plugin sets `analyze: path`.
 
-### `ModuleAnalysis`
+## Call graph
 
-Per-file analysis including:
+A **local** site is `<Child />` where `Child` is `cc(...)` in the same file.
 
-- imports
-- exports
-- default export
-- component functions
-- local scopes
-- local call graph
-- imported call sites
+An **imported** site stores `{ caller, source, name, props, spreads }`. The project pass resolves `source` to a file and attaches the site to that file’s export (or `"default"`).
 
-### `AnalyzerCache`
+`spreads` are analyzed when the expression is an object literal or a local `const props = { … }` in the caller. Otherwise every known callee prop is marked reactive.
 
-- Stores `ModuleAnalysis` objects keyed by absolute file path.
-- Maintains `reactiveProps: Map<filePath, Map<exportName, Set<propName>>>`.
-- Maintains a reverse importer index for targeted incremental propagation.
-- Serializes to JSON for persistence across process restarts.
+## Propagation
 
-## Propagation algorithm
+1. Seed callee sets from values that are already reactive in the caller’s local scope.
+2. Worklist over all component functions.
+3. For each site, add prop names whose values are reactive in the caller’s **full** scope (local bindings + that function’s own reactive props).
+4. Repeat until sets stop growing.
 
-1. Initialize every exported component with an empty reactive-prop set.
-2. For each component function, build a full scope that includes its own bindings and the reactive props of its parent.
-3. For each call site, check every named prop and object-literal spread key. If the value contains a reactive read, add the prop name to the callee's reactive set.
-4. For unknown spreads, add all known callee prop names.
-5. If a callee's reactive set grows, add the callee to the worklist and repeat until stable.
+Cycles terminate because sets only grow.
 
 ## Import resolution
 
-The resolver combines multiple sources:
+`createResolver` order:
 
-- `tsconfig.json` `paths`
-- `bunfig.toml` aliases
-- Relative imports
-- Custom resolver
+1. `tsconfig` `paths`
+2. `bunfig.toml` aliases
+3. Workspace package name + subpath
+4. Relative path + extensions / `index.*`
 
-Resolution order: tsconfig → bunfig → relative → custom.
+`AnalyzerCache` wraps that with an in-memory lookup so HMR can resolve `./Child` to a module that exists only in the cache.
 
-## Serialization
+## Cache persistence
 
-The cache serializes modules using function start/end positions as stable identifiers. When restoring, the source file is re-parsed and functions are matched by position. This allows the cache to survive source edits as long as the analyzed functions remain at the same positions.
+Serialized modules store function **start/end** offsets. Restore re-parses the file and remaps those spans. If a span is gone (the file was edited), `restoreModule` returns `null` and that entry is dropped. The next `update` fills it in.
+
+`remove(path)`:
+
+1. Collect importers of `path` and modules `path` imported
+2. Delete the module and importer index entries
+3. `recomputeFor` that set
+4. `save()` if `cachePath` is set
+
+That second set matters: deleting a parent must let the child’s props become static again.
+
+## Template protocol
+
+`COMPILER_TEMPLATE_SLOT_PROTOCOL` in `transform.ts` is duplicated from the runtime (`sinwan` template protocol). A drift test in the `sinwan` package keeps the two in sync. Slot types: `child`, `attr`, `event`, `ref`.

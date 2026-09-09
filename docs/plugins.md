@@ -1,22 +1,40 @@
-# Bun and Vite plugins
+# Using the compiler from Bun and Vite
 
-Both plugins use the shared compiler package. The cache is optional and enabled by passing the `cache` option.
+App projects should depend on **`bun-plugin-sinwan`** or **`vite-plugin-sinwan`**. Those packages import `sinwan-compiler` and pass the right options. You do not add `sinwan-compiler` unless you customize the pipeline.
 
-## Bun plugin
+## Bun
 
 ```ts
 import { sinwan } from "bun-plugin-sinwan";
 
-Bun.build({
-  entrypoints: ["./src/index.tsx"],
+export default sinwan({
+  hoist: true,
+  cache: {
+    root: process.cwd(),
+    tsConfigPath: "./tsconfig.json",
+    bunfigPath: "./bunfig.toml",
+    workspaces: "../../package.json",
+    cachePath: "./.sinwan/cache.json",
+  },
+});
+```
+
+`bunfig.toml` `[serve.static] plugins` can only load a **ready-made** plugin object. Scaffolded apps keep a small `sinwan-plugin.ts` that calls `sinwan({ cache: … })` and export that object.
+
+The Bun plugin pins `sinwan` / `sinwan/*` to the **app** `node_modules` so a `file:` or `link:` package (for example `sinwan-router`) does not load a second runtime.
+
+## Vite
+
+```ts
+import { sinwan } from "vite-plugin-sinwan";
+import { defineConfig } from "vite";
+
+export default defineConfig({
   plugins: [
     sinwan({
       hoist: true,
       cache: {
-        root: "./src",
         tsConfigPath: "./tsconfig.json",
-        bunfigPath: "./bunfig.toml",
-        workspaces: "../../package.json",
         cachePath: "./.sinwan/cache.json",
       },
     }),
@@ -24,37 +42,22 @@ Bun.build({
 });
 ```
 
-## Vite plugin
+The Vite plugin sets `resolve.dedupe: ["sinwan"]` for the same duplicate-runtime problem.
 
-```ts
-import { sinwan } from "vite-plugin-sinwan";
+## Shared plugin options
 
-export default {
-  plugins: [
-    sinwan({
-      hoist: true,
-      cache: {
-        tsConfigPath: "./tsconfig.json",
-        bunfigPath: "./bunfig.toml",
-        workspaces: "../../package.json",
-        cachePath: "./.sinwan/cache.json",
-      },
-    }),
-  ],
-};
-```
-
-## Cache options
-
-| Option         | Description                                                                                           |
-| -------------- | ----------------------------------------------------------------------------------------------------- |
-| `root`         | Project root for the analyzer.                                                                        |
-| `tsConfigPath` | Path to `tsconfig.json`.                                                                              |
-| `bunfigPath`   | Path to `bunfig.toml`. If omitted, the plugin tries to auto-detect `bunfig.toml` in the project root. |
-| `workspaces`   | Path to a workspace file (`package.json` or `pnpm-workspace.yaml`) or explicit package paths/globs.   |
-| `cachePath`    | Path to a JSON file for persistent cache.                                                             |
+| Option | Default | Role |
+| ------ | ------- | ---- |
+| `hoist` | `true` | Template hoisting |
+| `explicitBindings` | `false` | `_$bind*` helpers instead of bare `() =>` |
+| `analyze` | unset | Path to CLI JSON (production) |
+| `cache` | `true` | Incremental analyzer in dev. `false` turns it off. An object sets `root`, `tsConfigPath`, `bunfigPath`, `workspaces`, `cachePath` |
+| `fastRefresh` | `true` (Vite) | In-place component HMR in `vite serve` only |
 
 ## Dev vs production
 
-- In **dev**, enable the `cache` option for incremental HMR analysis.
-- In **production**, run the CLI ahead of time and pass the generated JSON via the `analyze` option for deterministic builds.
+**Dev** — leave `cache` on (the default). Each transformed file calls `AnalyzerCache.update`. No CLI step.
+
+**Production** — run [the CLI](cli.md) (or `analyze()`) and set `analyze` to that JSON so every CI machine uses the same metadata.
+
+If a file is deleted in HMR, the plugin should call `cache.remove(path)` so child components drop reactive props that only that caller needed. The compiler’s `remove` updates both importers and imported modules.
