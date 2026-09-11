@@ -2084,6 +2084,155 @@ describe("auto-cc wrapping", () => {
   });
 });
 
+describe("hook and inject signal wrapping", () => {
+  it("wraps .value reads from useTheme and inject without a local signal() call", () => {
+    const code = `
+      import { cc, inject } from "sinwan/component";
+      export const App = cc(() => {
+        const { theme, resolved } = useTheme();
+        const api = inject(ThemeKey);
+        return (
+          <div>
+            <span>{theme.value}</span>
+            <span>{resolved.value}</span>
+            <span>{api.theme.value}</span>
+          </div>
+        );
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("() => theme.value");
+    expect(result.code).toContain("() => resolved.value");
+    expect(result.code).toContain("() => api.theme.value");
+  });
+
+  it("wraps hook .value on imported component props inside a static map", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const App = cc(() => {
+        const { theme, setTheme, themes } = useTheme();
+        return (
+          <>
+            {themes.map((value) => (
+              <Button
+                variant={theme.value === value ? "default" : "outline"}
+                onclick={() => setTheme(value)}
+              >
+                {value}
+              </Button>
+            ))}
+          </>
+        );
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain(
+      'variant={() => theme.value === value ? "default" : "outline"}',
+    );
+    expect(result.code).not.toContain("() => themes.map");
+  });
+
+  it("keeps hook .value as getters on component props with explicitBindings", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const App = cc(() => {
+        const { theme } = useTheme();
+        return (
+          <div>
+            <span>{theme.value}</span>
+            <Button variant={theme.value === "dark" ? "default" : "outline"}>Dark</Button>
+          </div>
+        );
+      });
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).toContain("_$bindText(() => theme.value)");
+    expect(result.code).toContain(
+      'variant={() => theme.value === "dark" ? "default" : "outline"}',
+    );
+    expect(result.code).not.toContain('_$bindAttr("variant"');
+  });
+
+  it("wraps useState-style getters returned from a custom hook", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const App = cc(() => {
+        const { count } = useCounter();
+        const counter = useCounter();
+        const api = useCounter();
+        return (
+          <div>
+            <span>{count()}</span>
+            <span>{counter()}</span>
+            <span>{api.count()}</span>
+            <span>{count?.()}</span>
+            <Button disabled={count() > 0}>Go</Button>
+          </div>
+        );
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("() => count()");
+    expect(result.code).toContain("() => counter()");
+    expect(result.code).toContain("() => api.count()");
+    expect(result.code).toContain("() => count?.()");
+    expect(result.code).toContain("disabled={() => count() > 0}");
+  });
+
+  it("wraps hook getters as bindText with explicitBindings", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const App = cc(() => {
+        const { count } = useCounter();
+        return <span>{count()}</span>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).toContain("_$bindText(() => count())");
+  });
+
+  it("does not wrap local helpers, calls with arguments, or store methods", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { createMutable } from "sinwan/store";
+      import { computed, signal } from "sinwan/reactivity";
+      import { useState } from "sinwan/react";
+      export const App = cc(() => {
+        const greet = () => "hello";
+        const helpers = () => 1;
+        const state = createMutable({ n: 0 });
+        const count = signal(0);
+        const doubled = computed(() => 1);
+        const [n] = useState(0);
+        return (
+          <div>
+            <p>{greet()}</p>
+            <p>{format("x")}</p>
+            <p>{state.reset()}</p>
+            <p>{count.foo()}</p>
+            <p>{doubled.foo()}</p>
+            <p>{helpers.x()}</p>
+            <p>{n.foo()}</p>
+            <p>{format("x").count()}</p>
+            <button onclick={make()}>x</button>
+          </div>
+        );
+      });
+      export const Card = cc(({ user }) => <p>{user.save()}</p>);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("() => greet()");
+    expect(result.code).not.toContain("() => format(");
+    expect(result.code).not.toContain("() => count.foo()");
+    expect(result.code).not.toContain("() => doubled.foo()");
+    expect(result.code).not.toContain("() => helpers.x()");
+    expect(result.code).not.toContain("() => n.foo()");
+    expect(result.code).not.toContain("() => format(\"x\").count()");
+    expect(result.code).toContain("make()");
+    expect(result.code).not.toContain("() => make()");
+  });
+});
+
 describe("useFetch reactive tracking", () => {
   it("wraps destructured useFetch signal reads in JSX", () => {
     const code = `

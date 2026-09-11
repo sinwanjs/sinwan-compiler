@@ -9,6 +9,11 @@
  *   - `createMutable` / `createStore` from `sinwan/store`
  *   - `signal` / `computed` from `sinwan/reactivity`
  *   - `useState` from `sinwan/react`
+ *   - `.value` reads of signals returned from other modules (`useTheme`,
+ *     `inject`, custom hooks) even when those identifiers were not created
+ *     by a local `signal()` call
+ *   - zero-arity getter calls returned from hooks (`counter()`, `api.count()`)
+ *     the same way local `useState` getters (`count()`) are wrapped
  *
  * Example:
  *   <p>{state.name}</p>        → <p>{() => state.name}</p>
@@ -140,7 +145,7 @@ export function trackReactiveImports(ast: t.Node): ImportNames {
 
 // ─── Reactive binding kinds per scope ──────────────────────
 
-type BindingKind = "mutable" | "signal" | "computed" | "getter";
+type BindingKind = "mutable" | "signal" | "computed" | "getter" | "function";
 
 export interface MutableBinding {
   kind: "mutable";
@@ -158,6 +163,11 @@ export interface ComputedBinding {
 
 export interface GetterBinding {
   kind: "getter";
+}
+
+/** Local helper that is not a useState-style getter. `{greet()}` stays eager. */
+export interface FunctionBinding {
+  kind: "function";
 }
 
 /**
@@ -181,6 +191,7 @@ export type Binding =
   | SignalBinding
   | ComputedBinding
   | GetterBinding
+  | FunctionBinding
   | SignalObjectBinding
   | PropBinding;
 
@@ -375,6 +386,8 @@ function trackLocalScopeBindings(
       const body = fn.body;
       if (body && containsReactiveRead(body as t.Expression, scope)) {
         scope.bindings.set(name, { kind: "getter" });
+      } else {
+        scope.bindings.set(name, { kind: "function" });
       }
     },
   });
@@ -520,6 +533,15 @@ function visitCallCalleeAndArgs(
 }
 
 /**
+ * Sinwan signal reads use `.value` on the signal (`theme.value`) or on a
+ * property of a signal-bearing object (`api.theme.value`). Used when the root
+ * identifier was not created by a local `signal()` / `useFetch()` call.
+ */
+function isSignalValuePath(path: string[]): boolean {
+  return path[0] === "value" || (path.length >= 2 && path[1] === "value");
+}
+
+/**
  * Walk a (possibly optional / non-null-asserted) member-expression chain to its
  * root identifier, returning the root name and the property path.
  *
@@ -579,7 +601,11 @@ function isReactiveRead(node: t.Node, scope: ReactiveScope): boolean {
   const rootPath = getMemberExpressionRootAndPath(node);
   if (!rootPath) return false;
   const binding = scope.bindings.get(rootPath.root);
-  if (!binding) return false;
+  if (!binding) {
+    // Signals from inject / useTheme / other modules are not local `signal()`
+    // bindings. `{theme.value}` and `{api.theme.value}` still need wrapping.
+    return isSignalValuePath(rootPath.path);
+  }
 
   // Prop reads (including nested member expressions like props.user.name) are reactive.
   if (binding.kind === "prop") {
@@ -600,11 +626,40 @@ function isReactiveRead(node: t.Node, scope: ReactiveScope): boolean {
   return false;
 }
 
-function isGetterCall(node: t.CallExpression, scope: ReactiveScope): boolean {
+function isGetterCall(
+  node: t.CallExpression | t.OptionalCallExpression,
+  scope: ReactiveScope,
+): boolean {
   const callee = node.callee;
-  if (!t.isIdentifier(callee)) return false;
-  const binding = scope.bindings.get(callee.name);
-  return binding?.kind === "getter";
+  if (t.isIdentifier(callee)) {
+    const binding = scope.bindings.get(callee.name);
+    if (binding?.kind === "getter") return true;
+    if (binding) return false;
+    return node.arguments.length === 0;
+  }
+  if (
+    isMemberLike(callee) &&
+    !callee.computed &&
+    t.isIdentifier(callee.property)
+  ) {
+    if (node.arguments.length !== 0) return false;
+    const rootPath = getMemberExpressionRootAndPath(callee);
+    if (!rootPath) return false;
+    const binding = scope.bindings.get(rootPath.root);
+    if (
+      binding?.kind === "mutable" ||
+      binding?.kind === "function" ||
+      binding?.kind === "signal" ||
+      binding?.kind === "computed" ||
+      binding?.kind === "prop" ||
+      binding?.kind === "getter" ||
+      binding?.kind === "signalObject"
+    ) {
+      return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 export function isReactiveValue(node: t.Node, scope: ReactiveScope): boolean {
@@ -627,7 +682,9 @@ export function isReactiveValue(node: t.Node, scope: ReactiveScope): boolean {
   const rootPath = getMemberExpressionRootAndPath(node);
   if (!rootPath) return false;
   const binding = scope.bindings.get(rootPath.root);
-  if (!binding) return false;
+  if (!binding) {
+    return isSignalValuePath(rootPath.path);
+  }
 
   if (binding.kind === "prop" || binding.kind === "mutable") {
     return true;
@@ -662,7 +719,7 @@ export function containsReactiveValue(
       }
     }
 
-    if (t.isCallExpression(node) && isGetterCall(node, scope)) {
+    if (isCallLike(node) && isGetterCall(node, scope)) {
       found = true;
       return;
     }
@@ -732,7 +789,7 @@ function containsReactiveRead(
       }
     }
 
-    if (t.isCallExpression(node) && isGetterCall(node, scope)) {
+    if (isCallLike(node) && isGetterCall(node, scope)) {
       found = true;
       return;
     }
@@ -834,7 +891,7 @@ export function getComponentExpressionInfo(exprPath: {
     firstChar !== firstChar.toUpperCase() ||
     !/[A-Z]/.test(firstChar)
   ) {
-    return { isComponent: false, componentName: null, attributeName: null };
+    return { isComponent: false, componentName: null, attributeName };
   }
 
   return { isComponent: true, componentName, attributeName };
@@ -1608,13 +1665,15 @@ export function wrapReactiveExpressions(
           trackPropBindings(scope, path.node.params[0], allProps);
         }
       }
-      if (scope.bindings.size === 0) return;
 
       // Wrap reactive JSX expressions inside this function
       path.traverse({
         JSXExpressionContainer(exprPath: any) {
           const expr = exprPath.node.expression as t.Expression;
           const compInfo = getComponentExpressionInfo(exprPath);
+          if (compInfo.attributeName?.startsWith("on")) {
+            return;
+          }
           if (compInfo.isComponent && compInfo.attributeName !== null) {
             const knownProp =
               !!compInfo.componentName &&

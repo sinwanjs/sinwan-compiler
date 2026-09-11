@@ -70,6 +70,32 @@ describe("isReactiveValue", () => {
     expect(isReactiveValue(t.identifier("p"), scope)).toBe(true);
     expect(isReactiveValue(t.identifier("m"), scope)).toBe(true);
   });
+
+  it("treats untracked .value chains as signal reads", () => {
+    const empty: ReactiveScope = { bindings: new Map() };
+    expect(
+      isReactiveValue(
+        t.memberExpression(t.identifier("theme"), t.identifier("value")),
+        empty,
+      ),
+    ).toBe(true);
+    expect(
+      isReactiveValue(
+        t.memberExpression(
+          t.memberExpression(t.identifier("api"), t.identifier("theme")),
+          t.identifier("value"),
+        ),
+        empty,
+      ),
+    ).toBe(true);
+    expect(isReactiveValue(t.identifier("theme"), empty)).toBe(false);
+    expect(
+      isReactiveValue(
+        t.memberExpression(t.identifier("user"), t.identifier("name")),
+        empty,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("containsReactiveValue", () => {

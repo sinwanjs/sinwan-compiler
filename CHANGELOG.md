@@ -2,6 +2,19 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.11] — Wrap Hook And inject Reads (`.value` And Getters)
+
+sinwan-compiler 0.2.11 wraps reactive reads that come from another module so a `cc()` setup does not snapshot them: `{theme.value}` / `{api.theme.value}` from `useTheme()` or `inject()`, and `{count()}` / `{counter()}` / `{api.count()}` from a hook that returns `useState` getters.
+
+### Fixed
+
+- **Untracked `.value` reads (`reactive-wrap.ts`)**: Auto-wrap only recorded identifiers created by local `signal()` / `useFetch()` / props. `const { theme } = useTheme()` left `{theme.value}` as a one-time string, and wrapping was skipped entirely when the `cc()` body had no local reactive bindings. `.value` on an untracked root (`theme.value`, `api.theme.value`) now counts as a reactive read, including on imported component props such as `variant={theme.value === value ? …}`. Nested JSX inside `.map` still wraps the inner slots, not the list.
+- **Untracked getter calls (`reactive-wrap.ts`)**: Local `const [count] = useState(0)` already wrapped `{count()}`. `const { count } = useCounter()` / `const counter = useCounter()` left `{count()}` as a setup-time snapshot because the identifier was not a tracked getter. Zero-arity identifier calls and `api.count()` now wrap like `useState`. Local helpers (`greet()`), calls with arguments (`format("x")`), store methods, and event attributes (`onclick={make()}`) stay eager.
+
+### Internal
+
+- Transform regressions for `useTheme` / `inject` children, map + imported `Button` variant, `explicitBindings` native `bindText` vs component getters, hook-returned getters, optional `count?.()`, imported `disabled={count() > 0}`, and non-wrap cases (local helper, args, store method, `onclick`).
+
 ## [0.2.10] — Component Props Stay Getters With explicitBindings
 
 sinwan-compiler 0.2.10 wraps reactive **component** props as `() => …` even when `explicitBindings` is on, so `<For each={keys.map(...)}>` renders instead of an empty list.
