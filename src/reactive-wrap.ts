@@ -948,6 +948,12 @@ function createBindingDescriptor(
     ]);
   }
 
+  // `children` is a node tree (elements, arrays, fragments), not a string.
+  // Wrapping it in `_$bindText` stringifies vnodes as `[object Object]`.
+  if (t.isIdentifier(expr, { name: "children" })) {
+    return wrapExpression(expr);
+  }
+
   // JSX children and any other context default to a reactive text binding.
   return t.callExpression(t.identifier("_$bindText"), [wrapExpression(expr)]);
 }

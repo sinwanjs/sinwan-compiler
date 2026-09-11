@@ -1155,6 +1155,18 @@ describe("transformJSX", () => {
     expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
   });
 
+  it("does not wrap children passthrough as bindText with explicitBindings", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Menu = cc(({ children }) => {
+        return <div data-slot="menubar">{children}</div>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).not.toContain("_$bindText(() => children)");
+    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => children]");
+  });
+
   it("warns when a quoted style string contains ${...}", () => {
     const originalWarn = console.warn;
     const warnings: string[] = [];

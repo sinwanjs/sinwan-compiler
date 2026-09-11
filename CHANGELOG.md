@@ -2,6 +2,19 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.7] — Children Passthrough Is Not bindText
+
+sinwan-compiler 0.2.7 stops wrapping a bare `{children}` identifier as `_$bindText`, so hoisted hosts such as Menubar render menu vnodes instead of `[object Object]`.
+
+### Fixed
+
+- **Bare `children` identifier (`reactive-wrap.ts`)**: With `explicitBindings`, `{children}` inside a `cc()` component became `_$bindText(() => children)`. `String` of a vnode array is `[object Object],[object Object],…`. The identifier is now wrapped as `() => children` so `_$createTemplate` renders a node tree. Signal text such as `{count.value}` still uses `_$bindText`.
+
+### Internal
+
+- Added a transform regression that `cc(({ children }) => <div>{children}</div>)` emits `() => children` and not `_$bindText(() => children)` when `explicitBindings` is on.
+- Compiler tests: 220 pass / 0 fail (was 219). `src/` is 100% lines and 100% functions.
+
 ## [0.2.6] — Hoisted Form Defaults & JSX Enhancer Child Slots
 
 sinwan-compiler 0.2.6 maps uncontrolled input defaults to real HTML in hoisted templates, and keeps every `enhanced-elements.ts` special case on the `jsx()` path so compiled trees match the runtime enhancers.
