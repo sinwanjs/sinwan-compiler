@@ -2,6 +2,18 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.9] — Wrap Reactive Reads Inside Call Callbacks
+
+sinwan-compiler 0.2.9 wraps JSX expressions whose only reactive reads sit inside `.map` / `.filter` callbacks (or IIFEs), so `<For each={keys.map((k) => groups[query.value])}>` stays live without a manual `() =>`.
+
+### Fixed
+
+- **Call-callback reads (`reactive-wrap.ts`)**: `containsReactiveRead` skipped every nested function, so `each={arr.map((x) => query.value)}` was a setup-time snapshot. Reads inside **called** functions (map/filter callbacks, IIFE callees, default params, spread arguments) now count. Render props, event-handler factories (`const make = () => () => …`), and functions stored as values stay unwrapped. Already-emitted `_$bind*` getters are not re-entered. Prop-rooted members inside those callbacks get `unwrap(...)` when the outer expression is wrapped.
+
+### Internal
+
+- Transform regressions for `For each` map/optional-map/function-expression callbacks, static maps, filter-only local helpers, IIFE children, handler factories, and prop unwrap inside map callbacks.
+
 ## [0.2.8] — Wrap User-Component Children And Derived Props
 
 sinwan-compiler 0.2.8 wraps reactive reads in user-component children and derived attributes on unknown imported components, so `<Label>{checked.value ? "On" : "Off"}</Label>` stays live inside a `cc()` parent.

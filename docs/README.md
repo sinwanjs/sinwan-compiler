@@ -19,6 +19,7 @@ autoWrapComponents()     plain `export function App()` → cc(App)
     │
     ▼
 wrapReactiveExpressions()   {count.value} → {() => count.value}
+                            {arr.map(x => n.value)} → {() => arr.map(...)}
                             also wraps those reads as children/attrs of <Label>
     │
     ▼

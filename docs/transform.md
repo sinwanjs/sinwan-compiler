@@ -72,12 +72,14 @@ Reads the compiler wraps:
 - `useState` getters: `count()`
 - `useFetch` signal values: `f.data.value` (not the shell `f` or `f.data`)
 - Calls to a **local** function whose body reads one of the above
+- Reads **inside call callbacks** that run while the JSX expression is evaluated: `.map` / `.filter` / `Array.from` callbacks, IIFEs, and default parameters of those callbacks. `<For each={keys.map((k) => groups[query.value])}>` becomes `each={() => keys.map(...)}`. Nested JSX inside those callbacks is a separate wrap site (`items.map((i) => <span>{count.value}</span>)` wraps the inner text, not the whole map).
 
 Not wrapped:
 
 - Literals and plain identifiers
 - Event-handler functions (`onClick={fn}` or `onClick={() => …}`)
 - Nested function *values* passed as props (`title={() => s.value}` stays a render prop)
+- Functions stored as object/array values (`{ onClick: () => s.value }`) or returned from a factory (`const make = () => () => s.value`)
 - `useFetch` methods such as `abort` / `execute`
 - Static values the [analyzer](analyzer.md) proved never change
 

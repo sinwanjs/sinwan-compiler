@@ -581,6 +581,65 @@ describe("transformJSX", () => {
     expect(result.code).toContain("_$createTemplate(_$tmpl_0, [greet()])");
   });
 
+  it("wraps local helpers whose only reactive read is inside a filter callback", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const query = signal("");
+        const items = ["alpha", "beta"];
+        const filtered = () => items.filter((row) => row.includes(query.value));
+        return <For each={filtered()}>{(item) => <div>{item}</div>}</For>;
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("each={() => filtered()}");
+  });
+
+  it("wraps IIFE children that read a signal", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const query = signal("hi");
+        return <p>{(() => query.value)()}</p>;
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("() => (() => query.value)()");
+  });
+
+  it("does not wrap a factory that returns an event handler", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const query = signal("");
+        const make = () => () => {
+          query.value = "";
+        };
+        return <button onclick={make()}>clear</button>;
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("make()");
+    expect(result.code).not.toContain("() => make()");
+  });
+
+  it("unwraps prop roots inside map callbacks when wrapping For each", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const List = cc(({ users, label }) => {
+        return (
+          <For each={users.map((u) => ({ u, name: label.name, mark: <i />, bits: <></> }))}>
+            {(row) => <div>{row.name}</div>}
+          </For>
+        );
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("each={() =>");
+    expect(result.code).toContain("_$unwrap(users)");
+    expect(result.code).toContain("_$unwrap(label)");
+  });
+
   it("serializes static object styles into the HTML", () => {
     const code = `
       const Box = () => <div style={{ backgroundColor: "red", width: "100px", padding: 8 }} />;
@@ -1229,6 +1288,25 @@ describe("transformJSX", () => {
     expect(result.code).toContain("_$bindClass(() => ({");
   });
 
+  it("does not wrap a mapped element list when inner text is already bindText", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const count = signal(0);
+        return (
+          <div>
+            {["a"].map((row) => <span>{count.value}</span>)}
+            {["b"].map((row) => <>{count.value}</>)}
+          </div>
+        );
+      };
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).toContain("_$bindText(() => count.value)");
+    expect(result.code).not.toContain('() => ["a"].map');
+    expect(result.code).not.toContain('() => ["b"].map');
+  });
+
   it("does not wrap non-reactive values in explicit binding descriptors", () => {
     const code = `
       const App = ({ title }) => <p>{title}</p>;
@@ -1447,6 +1525,107 @@ describe("reactive component prop wrapping", () => {
       `;
       const result = transformJSX(code, "test.tsx");
       expect(result.code).not.toContain("each={() =>");
+    });
+
+    it("wraps For each when a signal is read inside a map callback", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const query = signal("");
+          const labels = { a: "A", b: "B" };
+          return (
+            <For
+              each={(Object.keys(labels) as string[]).map((category) => ({
+                category,
+                items: query.value,
+              }))}
+            >
+              {(entry) => <div>{entry.category}</div>}
+            </For>
+          );
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("each={() =>");
+      expect(result.code).toContain("query.value");
+      expect(result.code).not.toContain("each={() => () =>");
+    });
+
+    it("wraps For each when a signal is read inside an optional map callback", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const query = signal("x");
+          const items: string[] | undefined = ["a"];
+          return <For each={items?.map((row) => row + query.value)}>{(item) => <div>{item}</div>}</For>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("each={() =>");
+      expect(result.code).toContain("query.value");
+    });
+
+    it("wraps For each when a signal is read inside a function-expression callback", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const query = signal("x");
+          return (
+            <For each={["a"].map(function (row) { return row + query.value; })}>
+              {(item) => <div>{item}</div>}
+            </For>
+          );
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("each={() =>");
+      expect(result.code).toContain("query.value");
+    });
+
+    it("wraps For each when a signal is a map callback default and a spread arg", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const extra: string[] = [];
+        const App = () => {
+          const query = signal("q");
+          return (
+            <For each={["a"].map((row = query.value, ...rest) => row + rest.join(), ...extra)}>
+              {(item) => <div>{item}</div>}
+            </For>
+          );
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).toContain("each={() =>");
+      expect(result.code).toContain("query.value");
+    });
+
+    it("does NOT wrap For each with a static map callback", () => {
+      const code = `
+        const App = () => {
+          return <For each={[1, 2, 3].map((n) => n * 2)}>{(item) => <div>{item}</div>}</For>;
+        };
+      `;
+      const result = transformJSX(code, "test.tsx");
+      expect(result.code).not.toContain("each={() =>");
+    });
+
+    it("wraps For each map-callback reads with explicitBindings without re-wrapping", () => {
+      const code = `
+        import { signal } from "sinwan/reactivity";
+        const App = () => {
+          const query = signal("");
+          return (
+            <For each={["a"].map((row) => row + query.value)}>
+              {(item) => <div>{item}</div>}
+            </For>
+          );
+        };
+      `;
+      const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+      expect(result.code).toContain('_$bindAttr("each", () =>');
+      expect(result.code).toContain("query.value");
+      expect(result.code).not.toContain('_$bindAttr("each", () => _$bindAttr');
     });
 
     it("wraps Show when with reactive signal", () => {

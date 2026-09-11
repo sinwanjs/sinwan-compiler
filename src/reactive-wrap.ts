@@ -468,6 +468,57 @@ function isMemberLike(
   return t.isMemberExpression(node) || t.isOptionalMemberExpression(node);
 }
 
+function isFunctionLike(
+  node: t.Node,
+): node is t.ArrowFunctionExpression | t.FunctionExpression {
+  return t.isArrowFunctionExpression(node) || t.isFunctionExpression(node);
+}
+
+function isCallLike(
+  node: t.Node,
+): node is t.CallExpression | t.OptionalCallExpression {
+  return t.isCallExpression(node) || t.isOptionalCallExpression(node);
+}
+
+const COMPILER_BINDING_CALLEES = new Set([
+  "_$bindText",
+  "_$bindAttr",
+  "_$bindStyle",
+  "_$bindClass",
+  "_$unwrap",
+]);
+
+/**
+ * `_$bindText(() => expr)` and friends are already lazy. Entering their
+ * getter arguments would re-wrap the same JSX container forever.
+ */
+function isCompilerBindingCall(
+  node: t.CallExpression | t.OptionalCallExpression,
+): boolean {
+  const callee = node.callee;
+  return t.isIdentifier(callee) && COMPILER_BINDING_CALLEES.has(callee.name);
+}
+
+/**
+ * Call arguments and IIFE callees run while the outer JSX expression is
+ * evaluated (`.map` / `.filter` callbacks, `fn(...spread)`). Render props and
+ * returned handlers do not.
+ */
+function visitCallCalleeAndArgs(
+  node: t.CallExpression | t.OptionalCallExpression,
+  visitExpr: (expr: t.Node, enterFunction: boolean) => void,
+): void {
+  if (isCompilerBindingCall(node)) return;
+  visitExpr(node.callee, true);
+  for (const arg of node.arguments) {
+    if (t.isSpreadElement(arg)) {
+      visitExpr(arg.argument, true);
+      continue;
+    }
+    visitExpr(arg, true);
+  }
+}
+
 /**
  * Walk a (possibly optional / non-null-asserted) member-expression chain to its
  * root identifier, returning the root name and the property path.
@@ -651,9 +702,24 @@ function containsReactiveRead(
 ): boolean {
   let found = false;
 
-  function visit(node: any): void {
+  function visit(node: any, enterFunction: boolean): void {
     if (found) return;
     if (!node || typeof node !== "object") return;
+
+    if (isFunctionLike(node)) {
+      if (!enterFunction) return;
+      for (const param of node.params) {
+        visit(param, false);
+      }
+      visit(node.body, false);
+      return;
+    }
+
+    // Nested JSX has its own expression containers; wrapping the outer
+    // `.map()` would remount that tree instead of updating the inner slots.
+    if (t.isJSXElement(node) || t.isJSXFragment(node)) {
+      return;
+    }
 
     if (
       isMemberLike(node) ||
@@ -671,8 +737,8 @@ function containsReactiveRead(
       return;
     }
 
-    // Do not recurse into nested function bodies — those are separate scopes
-    if (t.isArrowFunctionExpression(node) || t.isFunctionExpression(node)) {
+    if (isCallLike(node)) {
+      visitCallCalleeAndArgs(node, visit);
       return;
     }
 
@@ -688,15 +754,15 @@ function containsReactiveRead(
       const value = (node as any)[key];
       if (Array.isArray(value)) {
         for (const item of value) {
-          if (item && typeof item === "object") visit(item);
+          if (item && typeof item === "object") visit(item, false);
         }
       } else if (value && typeof value === "object") {
-        visit(value);
+        visit(value, false);
       }
     }
   }
 
-  visit(expr);
+  visit(expr, false);
   return found;
 }
 
@@ -873,12 +939,21 @@ function transformPropMemberAccess(
     }
   }
 
-  function visit(node: any): void {
+  function visit(node: any, enterFunction: boolean): void {
     if (!node || typeof node !== "object") return;
 
-    // Don't recurse into nested function bodies — separate scopes.
-    if (t.isArrowFunctionExpression(node) || t.isFunctionExpression(node))
+    if (isFunctionLike(node)) {
+      if (!enterFunction) return;
+      for (const param of node.params) {
+        visit(param, false);
+      }
+      visit(node.body, false);
       return;
+    }
+
+    if (t.isJSXElement(node) || t.isJSXFragment(node)) {
+      return;
+    }
 
     if (isMemberLike(node)) {
       const rootPath = getMemberExpressionRootAndPath(node);
@@ -892,7 +967,13 @@ function transformPropMemberAccess(
           return;
         }
       }
-      // Root is not a prop — member access is safe as-is.
+      // Root is not a prop — member access is safe as-is. Nested call
+      // arguments (`.map` callbacks) are visited from the CallExpression.
+      return;
+    }
+
+    if (isCallLike(node)) {
+      visitCallCalleeAndArgs(node, visit);
       return;
     }
 
@@ -909,15 +990,15 @@ function transformPropMemberAccess(
       const value = (node as any)[key];
       if (Array.isArray(value)) {
         for (const item of value) {
-          if (item && typeof item === "object") visit(item);
+          if (item && typeof item === "object") visit(item, false);
         }
       } else if (value && typeof value === "object") {
-        visit(value);
+        visit(value, false);
       }
     }
   }
 
-  visit(expr);
+  visit(expr, false);
   return changed;
 }
 
