@@ -36,9 +36,9 @@ export interface TransformOptions {
   /**
    * Resolves an import source (e.g. "./Child") to an absolute file path,
    * relative to the file being transformed. Used to look up reactive-prop
-   * metadata for components imported from other modules so reactive values
-   * passed to them are wrapped at the call site. When omitted, cross-module
-   * component call sites fall back to the conservative (non-wrapping) behavior.
+   * metadata for components imported from other modules. Derived reads
+   * (`title={n.value}`) wrap even without metadata; bare signal/store
+   * identifiers stay unwrapped.
    */
   resolveImport?: (source: string, fromFile: string) => string | null;
 }

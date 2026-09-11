@@ -22,6 +22,8 @@ The compiler turns the child into a lazy getter:
 <p>{() => count.value}</p>
 ```
 
+The same wrap applies to **user-component children**. `<Label>{checked.value ? "On" : "Off"}</Label>` becomes `{() => checked.value ? "On" : "Off"}` so a one-shot `cc()` parent does not snapshot the string.
+
 The runtime runs that function inside an effect and updates the text when `count` changes.
 
 ## Automatic `cc()` wrapping
@@ -83,9 +85,12 @@ Not wrapped:
 
 **Native elements** (`div`, `p`, `button`, …): wrap reactive children and attributes.
 
-**User components** (`<Child title={…} />`): wrap a prop only if that prop is reactive for `Child` (local call graph, analyzer metadata, or a conservative fallback for exported components). Children forwarded to a user component stay unwrapped so the child can read `children` itself.
+**User components** (`<Label>`, `<Child title={…} />`):
 
-**Built-in control-flow** components wrap specific props, and they *do* wrap reactive expression children (those children render directly):
+- **Children:** wrap reactive reads the same way as DOM text (`{count.value}`, `{checked.value ? "On" : "Off"}`) so `cc()` parents do not snapshot the value. Use a getter (`() => …`), never `_$bindText`, because the child may render nodes as well as strings. Render-prop functions (`{(v) => …}`) stay untouched.
+- **Props:** wrap a prop if it is known-reactive for that component (built-in registry, local call graph, analyzer metadata). For *unknown* imported components, still wrap **derived reads** (`htmlFor={id.value}`, `disabled={off.value}`) and leave **container pass-through** alone (`checked={checked}`, `user={user}`) so the child receives the signal or store proxy.
+
+**Built-in control-flow** components wrap specific props, and they wrap reactive expression children (those children render directly):
 
 | Component | Reactive props |
 | --------- | -------------- |

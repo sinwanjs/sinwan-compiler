@@ -741,18 +741,101 @@ describe("transformJSX", () => {
     expect(result.code).not.toContain("user={() => user}");
   });
 
-  it("does not wrap reactive reads passed as component children", () => {
+  it("wraps reactive reads passed as component children", () => {
+    const code = `
+      import { signal } from "sinwan/reactivity";
+      const App = () => {
+        const checked = signal(true);
+        return <Child>{checked.value}</Child>;
+      };
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("<Child>{() => checked.value}</Child>");
+  });
+
+  it("wraps signal reads and ternaries as user-component children", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      import { Label } from "sinwan-ui";
+      export const App = cc(() => {
+        const checked = signal(true);
+        return <Label>{checked.value ? "On" : "Off"}</Label>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('{() => checked.value ? "On" : "Off"}');
+  });
+
+  it("does not emit bindText for user-component children with explicitBindings", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      import { Label } from "sinwan-ui";
+      export const App = cc(() => {
+        const checked = signal(true);
+        return <Label>{checked.value ? <b>On</b> : "Off"}</Label>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).toContain("{() => checked.value ?");
+    expect(result.code).not.toContain("_$bindText(() => checked.value");
+  });
+
+  it("does not double-wrap an explicit children getter", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      import { Label } from "sinwan-ui";
+      export const App = cc(() => {
+        const checked = signal(true);
+        return <Label>{() => (checked.value ? "On" : "Off")}</Label>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).not.toContain("() => () =>");
+    expect(result.code).toContain("{() => checked.value ? \"On\" : \"Off\"}");
+  });
+
+  it("wraps derived attributes on unknown imported components", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      import { Label } from "sinwan-ui";
+      export const App = cc(() => {
+        const id = signal("cb");
+        return <Label htmlFor={id.value}>Name</Label>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("htmlFor={() => id.value}");
+  });
+
+  it("does not wrap a non-null mutable object passed to an unknown component", () => {
     const code = `
       import { createMutable } from "sinwan/store";
       const App = () => {
         const state = createMutable({ user: { name: "Ada" } });
-        const { name } = state.user;
-        return <Child>{name}</Child>;
+        const { user } = state;
+        return <Child user={user!} />;
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("<Child>{name}</Child>");
-    expect(result.code).not.toContain("() => name");
+    expect(result.code).toContain("user={user!}");
+    expect(result.code).not.toContain("user={() =>");
+  });
+
+  it("does not wrap a forwarded prop identifier on an unknown component", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { Unknown } from "pkg";
+      export const Child = cc(({ user }) => {
+        return <Unknown user={user} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("user={user}");
+    expect(result.code).not.toContain("user={() => user}");
   });
 
   it("still wraps reactive reads in DOM element attributes", () => {
@@ -1323,10 +1406,10 @@ describe("transformJSX", () => {
     expect(result.code).not.toContain("class={() =>");
   });
 
-  it("leaves imported component call sites unwrapped without a resolver", () => {
-    // When no resolveImport is provided (e.g. the offline `analyze` path
-    // without a plugin cache), cross-module call sites fall back to the
-    // conservative non-wrapping behavior so behavior never regresses.
+  it("wraps derived class expressions on imported components without a resolver", () => {
+    // Unknown imported components still wrap derived reads (`count()`,
+    // `id.value`) even when analyze metadata is missing. Bare containers
+    // (`checked={checked}`) stay unwrapped.
     const parentCode = `
       import { useState } from "sinwan/react";
       import { Child } from "./Child";
@@ -1338,7 +1421,7 @@ describe("transformJSX", () => {
     const result = transformJSX(parentCode, "/project/App.tsx", {
       analyzeMetadata: new Map(),
     });
-    expect(result.code).not.toContain("class={() =>");
+    expect(result.code).toContain("class={() =>");
   });
 });
 
@@ -1508,7 +1591,7 @@ describe("reactive component prop wrapping", () => {
       expect(result.code).not.toContain("fallback={() =>");
     });
 
-    it("does NOT wrap Suspense fallback (not in registry)", () => {
+    it("wraps derived Suspense fallback reads even when not in the registry", () => {
       const code = `
         import { signal } from "sinwan/reactivity";
         const App = () => {
@@ -1517,7 +1600,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).not.toContain("fallback={() =>");
+      expect(result.code).toContain("fallback={() => loading.value}");
     });
   });
 
@@ -1946,21 +2029,18 @@ describe("built-in control-flow direct reactive children", () => {
     expect(result.code).toContain(">content</Show>");
   });
 
-  it("does NOT wrap reactive children forwarded to a user component", () => {
+  it("wraps reactive children forwarded to a user component", () => {
     const code = `
       import { cc } from "sinwan/component";
-      import { createMutable } from "sinwan/store";
+      import { signal } from "sinwan/reactivity";
       const Child = cc(({ children }) => <h1>{children}</h1>);
       export const App = cc(() => {
-        const state = createMutable({ user: { name: "Ada" } });
-        const { name } = state.user;
-        return <Child>{name}</Child>;
+        const checked = signal(true);
+        return <Child>{checked.value ? "On" : "Off"}</Child>;
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    // forwarded children stay unwrapped (the child's own JSX handles it)
-    expect(result.code).toContain("<Child>{name}</Child>");
-    expect(result.code).not.toContain("() => name");
+    expect(result.code).toContain('{() => checked.value ? "On" : "Off"}');
   });
 });
 
@@ -2314,7 +2394,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("{a.value}{b.value}");
+    expect(result.code).toContain("{() => a.value}{() => b.value}");
   });
 
   it("treats export default of a cc() variable as exported", () => {

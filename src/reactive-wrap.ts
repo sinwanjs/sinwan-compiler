@@ -82,15 +82,24 @@ function isBuiltinReactiveProp(
 }
 
 /**
- * Whether a JSX element name refers to a built-in control-flow component
- * (Show, For, Switch, ...). Direct reactive expression children of these are
- * wrapped so they re-evaluate when the control-flow re-renders — e.g.
- * `<Show when={data}>{data?.value?.message}</Show>`. Children of user
- * components are left unwrapped so reactive values forward through the
- * `children` prop (the child's own JSX handles reactivity).
+ * True when the expression is only passing a reactive container through
+ * (`count`, `user`, `state`) rather than reading it (`count.value`,
+ * `checked.value ? "On" : "Off"`). Those objects must stay unwrapped so the
+ * child can subscribe itself; wrapping would turn a live proxy/signal into a
+ * getter of the same object.
  */
-function isBuiltinControlFlowComponent(componentName: string | null): boolean {
-  return !!componentName && BUILTIN_REACTIVE_PROPS.has(componentName);
+function isReactiveContainerPassThrough(
+  expr: t.Expression,
+  scope: ReactiveScope,
+): boolean {
+  let node: t.Node = expr;
+  while (t.isTSNonNullExpression(node)) {
+    node = node.expression;
+  }
+  if (!t.isIdentifier(node)) return false;
+  const binding = scope.bindings.get(node.name);
+  if (!binding) return false;
+  return binding.kind === "mutable" || binding.kind === "prop";
 }
 
 export function trackReactiveImports(ast: t.Node): ImportNames {
@@ -948,13 +957,18 @@ function createBindingDescriptor(
     ]);
   }
 
-  // `children` is a node tree (elements, arrays, fragments), not a string.
-  // Wrapping it in `_$bindText` stringifies vnodes as `[object Object]`.
-  if (t.isIdentifier(expr, { name: "children" })) {
+  // Component children (and a bare `children` identifier on native hosts) are
+  // a node tree, not a string. `_$bindText` stringifies vnodes as
+  // `[object Object]`. Keep a getter so the runtime can render text *or* nodes.
+  const compInfo = getComponentExpressionInfo(exprPath);
+  if (
+    t.isIdentifier(expr, { name: "children" }) ||
+    (compInfo.isComponent && compInfo.attributeName === null)
+  ) {
     return wrapExpression(expr);
   }
 
-  // JSX children and any other context default to a reactive text binding.
+  // Native element text children default to a reactive text binding.
   return t.callExpression(t.identifier("_$bindText"), [wrapExpression(expr)]);
 }
 
@@ -1514,32 +1528,26 @@ export function wrapReactiveExpressions(
         JSXExpressionContainer(exprPath: any) {
           const expr = exprPath.node.expression as t.Expression;
           const compInfo = getComponentExpressionInfo(exprPath);
-          if (compInfo.isComponent) {
-            if (compInfo.attributeName !== null) {
-              // Component attribute — wrap only if it is a reactive prop.
-              if (
-                !compInfo.componentName ||
-                !isReactiveComponentProp(
-                  compInfo.componentName,
-                  compInfo.attributeName,
-                  componentNames,
-                  reactiveProps,
-                  importedReactiveProps,
-                )
-              ) {
-                return;
-              }
-            } else {
-              // Direct child expression of a component. For user components,
-              // leave children unwrapped so reactive values forward through
-              // the `children` prop (the child's own JSX re-renders). For
-              // built-in control-flow components (e.g. <Show>), the children
-              // are rendered directly, so fall through to `shouldWrap` and
-              // wrap reactive expression children (render-prop functions and
-              // static values are skipped by `shouldWrap`).
-              if (!isBuiltinControlFlowComponent(compInfo.componentName)) {
-                return;
-              }
+          if (compInfo.isComponent && compInfo.attributeName !== null) {
+            const knownProp =
+              !!compInfo.componentName &&
+              isReactiveComponentProp(
+                compInfo.componentName,
+                compInfo.attributeName,
+                componentNames,
+                reactiveProps,
+                importedReactiveProps,
+              );
+            // Known reactive props (Show.when, inferred call-graph props) wrap
+            // below. Unknown imported components still wrap *derived reads*
+            // (`title={n.value}`) so styled wrappers like <Label> stay live.
+            // Do not wrap a bare signal/store identifier — the child owns it.
+            if (
+              !knownProp &&
+              (!shouldWrap(expr, scope) ||
+                isReactiveContainerPassThrough(expr, scope))
+            ) {
+              return;
             }
           }
           if (shouldWrap(expr, scope)) {

@@ -19,6 +19,7 @@ autoWrapComponents()     plain `export function App()` → cc(App)
     │
     ▼
 wrapReactiveExpressions()   {count.value} → {() => count.value}
+                            also wraps those reads as children/attrs of <Label>
     │
     ▼
 hoist templates             <div class="card">…</div> → _$tmpl_N

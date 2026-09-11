@@ -2,6 +2,19 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.8] — Wrap User-Component Children And Derived Props
+
+sinwan-compiler 0.2.8 wraps reactive reads in user-component children and derived attributes on unknown imported components, so `<Label>{checked.value ? "On" : "Off"}</Label>` stays live inside a `cc()` parent.
+
+### Fixed
+
+- **User-component children (`reactive-wrap.ts`)**: `{count.value}` and `{checked.value ? "On" : "Off"}` passed to `<Label>` / `<Child>` were left as a one-time snapshot because wrapping only ran for native tags and built-in control-flow. Those reads are now wrapped as `() => …`. With `explicitBindings`, component children still use a getter (not `_$bindText`) so vnode-returning expressions do not stringify as `[object Object]`.
+- **Unknown imported component props**: derived reads such as `htmlFor={id.value}` are wrapped even without analyzer metadata. Bare signal/store identifiers (`checked={checked}`, `user={user}`) stay unwrapped so the child receives the container.
+
+### Internal
+
+- Transform regressions for Label-style children, explicitBindings vnode children, imported `htmlFor={id.value}`, and `user={user!}` / forwarded `user={user}` pass-through.
+
 ## [0.2.7] — Children Passthrough Is Not bindText
 
 sinwan-compiler 0.2.7 stops wrapping a bare `{children}` identifier as `_$bindText`, so hoisted hosts such as Menubar render menu vnodes instead of `[object Object]`.
