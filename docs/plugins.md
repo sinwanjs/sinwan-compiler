@@ -51,6 +51,7 @@ The Vite plugin sets `resolve.dedupe: ["sinwan"]` for the same duplicate-runtime
 | Option | Default | Role |
 | ------ | ------- | ---- |
 | `hoist` | `true` | Template hoisting |
+| `dev` | Bun: `NODE_ENV !== "production"` at `sinwan()`; Vite: `config.mode !== "production"` | Warn when hoisting is skipped. Pass `false` for library/`Bun.build` production bundles. |
 | `explicitBindings` | `false` | `_$bind*` helpers instead of bare `() =>` |
 | `analyze` | unset | Path to CLI JSON (production) |
 | `cache` | `true` | Incremental analyzer in dev. `false` turns it off. An object sets `root`, `tsConfigPath`, `bunfigPath`, `workspaces`, `cachePath` |
