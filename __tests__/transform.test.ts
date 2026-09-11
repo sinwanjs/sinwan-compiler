@@ -870,6 +870,32 @@ describe("transformJSX", () => {
     expect(result.code).toContain("htmlFor={() => id.value}");
   });
 
+  it("does not emit bindAttr for component props with explicitBindings", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      import { Label } from "sinwan-ui";
+      export const App = cc(() => {
+        const id = signal("cb");
+        const items = signal(["a"]);
+        return (
+          <>
+            <Label htmlFor={id.value}>Name</Label>
+            <For each={items.value}>{(item) => <div>{item}</div>}</For>
+            <Show when={id.value}>x</Show>
+          </>
+        );
+      });
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).toContain("htmlFor={() => id.value}");
+    expect(result.code).toContain("each={() => items.value}");
+    expect(result.code).toContain("when={() => id.value}");
+    expect(result.code).not.toContain('_$bindAttr("htmlFor"');
+    expect(result.code).not.toContain('_$bindAttr("each"');
+    expect(result.code).not.toContain('_$bindAttr("when"');
+  });
+
   it("does not wrap a non-null mutable object passed to an unknown component", () => {
     const code = `
       import { createMutable } from "sinwan/store";
@@ -1623,9 +1649,10 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-      expect(result.code).toContain('_$bindAttr("each", () =>');
+      expect(result.code).toContain("each={() =>");
       expect(result.code).toContain("query.value");
-      expect(result.code).not.toContain('_$bindAttr("each", () => _$bindAttr');
+      expect(result.code).not.toContain('_$bindAttr("each"');
+      expect(result.code).not.toContain("each={() => () =>");
     });
 
     it("wraps Show when with reactive signal", () => {

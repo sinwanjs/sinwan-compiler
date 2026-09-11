@@ -1021,6 +1021,12 @@ function createBindingDescriptor(
 
   const parent = exprPath.parentPath;
   if (parent && parent.isJSXAttribute && parent.isJSXAttribute()) {
+    const compInfo = getComponentExpressionInfo(exprPath);
+    // Control-flow and user components call `resolve(prop)`. A bindAttr
+    // descriptor is not an array/boolean, so `<For each>` would render empty.
+    if (compInfo.isComponent) {
+      return wrapExpression(expr);
+    }
     const attrName = parent.node.name.name as string;
     if (attrName === "style") {
       return t.callExpression(t.identifier("_$bindStyle"), [

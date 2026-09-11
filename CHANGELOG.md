@@ -2,6 +2,18 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.10] — Component Props Stay Getters With explicitBindings
+
+sinwan-compiler 0.2.10 wraps reactive **component** props as `() => …` even when `explicitBindings` is on, so `<For each={keys.map(...)}>` renders instead of an empty list.
+
+### Fixed
+
+- **Component prop wrapping (`reactive-wrap.ts`)**: With `explicitBindings: true`, auto-wrapped `For.each` / `Show.when` / `Label htmlFor` became `_$bindAttr("each", () => …)`. `resolve()` does not unwrap bind descriptors, so `For` treated `each` as a non-array and rendered nothing. Manual `each={() => …}` worked because `shouldWrap` skipped it. Component attributes now stay getters; native tags still use `_$bindAttr` / `_$bindStyle` / `_$bindClass`.
+
+### Internal
+
+- Transform regressions: `For each` map callbacks, `Show when`, and imported `htmlFor` with `explicitBindings` emit getters and not `_$bindAttr`.
+
 ## [0.2.9] — Wrap Reactive Reads Inside Call Callbacks
 
 sinwan-compiler 0.2.9 wraps JSX expressions whose only reactive reads sit inside `.map` / `.filter` callbacks (or IIFEs), so `<For each={keys.map((k) => groups[query.value])}>` stays live without a manual `() =>`.

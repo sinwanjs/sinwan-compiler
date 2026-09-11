@@ -90,7 +90,7 @@ Not wrapped:
 **User components** (`<Label>`, `<Child title={…} />`):
 
 - **Children:** wrap reactive reads the same way as DOM text (`{count.value}`, `{checked.value ? "On" : "Off"}`) so `cc()` parents do not snapshot the value. Use a getter (`() => …`), never `_$bindText`, because the child may render nodes as well as strings. Render-prop functions (`{(v) => …}`) stay untouched.
-- **Props:** wrap a prop if it is known-reactive for that component (built-in registry, local call graph, analyzer metadata). For *unknown* imported components, still wrap **derived reads** (`htmlFor={id.value}`, `disabled={off.value}`) and leave **container pass-through** alone (`checked={checked}`, `user={user}`) so the child receives the signal or store proxy.
+- **Props:** wrap a prop if it is known-reactive for that component (built-in registry, local call graph, analyzer metadata). For *unknown* imported components, still wrap **derived reads** (`htmlFor={id.value}`, `disabled={off.value}`) and leave **container pass-through** alone (`checked={checked}`, `user={user}`) so the child receives the signal or store proxy. With `explicitBindings`, component props stay **getters** (`each={() => …}`), never `_$bindAttr` — `For` / `Show` / `Label` call `resolve(prop)`, which does not unwrap bind descriptors.
 
 **Built-in control-flow** components wrap specific props, and they wrap reactive expression children (those children render directly):
 
@@ -141,6 +141,6 @@ transformJSX(code, "src/App.tsx", {
 
 - **`analyze` / `analyzeMetadata`** — cross-file reactive props. Invalid JSON is ignored (transform still succeeds).
 - **`resolveImport`** — maps `./Child` to an absolute file so imported components can use analyzer metadata. Without it, imported call sites are not wrapped at the parent.
-- **`explicitBindings`** — wrap with `_$bindText` / `_$bindAttr` / `_$bindStyle` / `_$bindClass` from `sinwan/renderer` instead of a bare `() => …`.
+- **`explicitBindings`** — wrap **native** text/attrs with `_$bindText` / `_$bindAttr` / `_$bindStyle` / `_$bindClass`. Component props and component children stay `() => …` so `resolve(prop)` still sees a getter.
 
 Returns `{ code, map }` with a source map.
