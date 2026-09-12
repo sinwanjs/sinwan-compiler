@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { parse } from "@babel/parser";
+import _generate from "@babel/generator";
 import * as t from "@babel/types";
 import {
   collectComponentCallGraph,
@@ -14,6 +15,11 @@ import {
   wrapReactiveExpressions,
   type ReactiveScope,
 } from "../src/reactive-wrap";
+
+const generate =
+  typeof _generate === "function"
+    ? _generate
+    : ((_generate as { default?: typeof _generate }).default ?? _generate);
 
 function parseModule(code: string) {
   return parse(code, { sourceType: "module", plugins: ["jsx", "typescript"] });
@@ -207,5 +213,16 @@ describe("wrapReactiveExpressions", () => {
     const ast = parseModule(`const App = () => <div>hi</div>;`);
     wrapReactiveExpressions(ast);
     expect(ast.program.body.length).toBe(1);
+  });
+
+  it("keeps a children identifier as a getter with explicitBindings", () => {
+    const ast = parseModule(`
+      import { cc } from "sinwan/component";
+      export const Menu = cc(({ children }) => <div>{children}</div>);
+    `);
+    wrapReactiveExpressions(ast, { explicitBindings: true });
+    const code = generate(ast).code;
+    expect(code).toContain("{() => children}");
+    expect(code).not.toContain("_$bindText(() => children)");
   });
 });

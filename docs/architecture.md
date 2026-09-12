@@ -8,6 +8,7 @@ This page is for people changing the compiler. App authors can stay on [Transfor
 src/
   index.ts           Public exports
   auto-cc.ts         Exported function → cc(...)
+  live-cc-destructure.ts  Flat cc(({ value }) => …) → props.value
   reactive-wrap.ts   Imports, scopes, call graph, wrap
   transform.ts       Hoist + transformJSX
   analyze.ts         Project scan, resolution, AnalyzerCache
@@ -20,6 +21,7 @@ src/
 ```text
 transformJSX
   autoWrapComponents
+  rewriteLiveCcDestructure  ← flat destructure stays live; raw JSX spreads
   wrapReactiveExpressions   ← analyze / analyzeMetadata / resolveImport
   hoist JSXElement roots    ← _$createTemplate + slots
 

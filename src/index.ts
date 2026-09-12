@@ -8,6 +8,7 @@
 export { transformJSX, type TransformOptions } from "./transform";
 export { COMPILER_TEMPLATE_SLOT_PROTOCOL } from "./transform";
 export { autoWrapComponents } from "./auto-cc";
+export { rewriteLiveCcDestructure } from "./live-cc-destructure";
 export {
   analyze,
   analyzeProject,

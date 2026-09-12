@@ -2,6 +2,24 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.3.0] — Live `cc` Destructure
+
+sinwan-compiler 0.3.0 rewrites flat `cc` / auto-`cc` object destructure so props stay live after Sinwan 1.4.0 unwraps zero-arity getters. Pair with **sinwan 1.4.0** (`createLiveRest` / `getSpreadProps`).
+
+### Added
+
+- **`rewriteLiveCcDestructure` (`live-cc-destructure.ts`)**: After auto-`cc` and before wrap, `cc(({ value }) => …)` becomes `cc((props) => …)` and locals rewrite to `props.value`. Defaults use JS `=== void 0` on each read. Nested / computed patterns are left as snapshots.
+
+### Changed
+
+- **Rest and JSX spread**: `{ value, ...rest }` is `createLiveRest(props, omittedKeys)`. Native or forwarded `{...props}` / `{...rest}` becomes `{...getSpreadProps(...)}` so attributes keep getter functions instead of freezing unwrapped values at setup.
+- **Forwarded prop members**: Destructured props used as child attributes wrap as getters (`user={() => _$unwrap(props).user}`) so the child stays live.
+
+### Internal
+
+- Transform regressions for flat destructure, rest + spread helpers, identifier `{...props}`, nested snapshot leave-alone, and `explicitBindings` children getters.
+- `bun run test` — 264 pass / 0 fail. `src/` is 100% lines and functions. `bun run typecheck` clean.
+
 ## [0.2.11] — Wrap Hook And inject Reads (`.value` And Getters)
 
 sinwan-compiler 0.2.11 wraps reactive reads that come from another module so a `cc()` setup does not snapshot them: `{theme.value}` / `{api.theme.value}` from `useTheme()` or `inject()`, and `{count()}` / `{counter()}` / `{api.count()}` from a hook that returns `useState` getters.

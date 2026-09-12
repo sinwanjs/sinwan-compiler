@@ -54,6 +54,24 @@ Not wrapped: lowercase helpers, generators, multi-argument functions, or functio
 
 `cc` may be imported from `sinwan` or `sinwan/component`.
 
+## Live `cc` props
+
+`cc` setup runs once. The runtime wraps the raw props bag in a Proxy that invokes **zero-arity getters** on each read (`props.value`), while `'value' in props` inspects the raw bag.
+
+The compiler rewrites **flat** destructure so those reads stay live:
+
+```tsx
+export const Child = cc(({ value }) => <span>{value}</span>);
+
+// becomes (then wrap)
+export const Child = cc((props) => <span>{() => props.value}</span>);
+```
+
+- Defaults `({ value = "" })` stay JS “undefined → default” **on each read**. Controlled vs omitted still uses `'value' in props`, not a destructure default.
+- Rest `({ value, ...rest })` becomes `const rest = createLiveRest(props, ["value"])`.
+- Nested `({ user: { name } })` is **not** rewritten (setup snapshot).
+- Native or forwarded `{...props}` / `{...rest}` spreads `getSpreadProps(...)` so attributes keep getter functions instead of freezing unwrapped values at setup.
+
 ## What counts as reactive
 
 Tracked imports:

@@ -636,8 +636,8 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain("each={() =>");
-    expect(result.code).toContain("_$unwrap(users)");
-    expect(result.code).toContain("_$unwrap(label)");
+    expect(result.code).toContain("_$unwrap(props).users");
+    expect(result.code).toContain("_$unwrap(props).label");
   });
 
   it("serializes static object styles into the HTML", () => {
@@ -910,7 +910,7 @@ describe("transformJSX", () => {
     expect(result.code).not.toContain("user={() =>");
   });
 
-  it("does not wrap a forwarded prop identifier on an unknown component", () => {
+  it("forwards a destructured prop as a live getter on an unknown component", () => {
     const code = `
       import { cc } from "sinwan/component";
       import { Unknown } from "pkg";
@@ -919,8 +919,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("user={user}");
-    expect(result.code).not.toContain("user={() => user}");
+    expect(result.code).toContain("user={() => _$unwrap(props).user}");
   });
 
   it("still wraps reactive reads in DOM element attributes", () => {
@@ -958,7 +957,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain(
-      "_$createTemplate(_$tmpl_0, [() => _$unwrap(user).name])",
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).user.name])",
     );
   });
 
@@ -971,11 +970,11 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain(
-      "_$createTemplate(_$tmpl_0, [() => _$unwrap(count).value])",
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).count.value])",
     );
   });
 
-  it("does not wrap props passed to nested components", () => {
+  it("forwards nested component props as live getters", () => {
     const code = `
       import { cc } from "sinwan/component";
       const Child = cc(({ user }) => {
@@ -983,8 +982,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("user={user}");
-    expect(result.code).not.toContain("user={() => user}");
+    expect(result.code).toContain("user={() => _$unwrap(props).user}");
   });
 
   it("wraps prop reads in DOM element attributes", () => {
@@ -995,7 +993,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => _$unwrap(count).value");
+    expect(result.code).toContain("() => _$unwrap(props).count.value");
   });
 
   it("does not wrap static string props in component JSX", () => {
@@ -1007,8 +1005,8 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
-    expect(result.code).not.toContain("() => title");
+    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+    expect(result.code).not.toContain("() => props.title");
   });
 
   it("does not wrap static numeric props in component JSX", () => {
@@ -1020,8 +1018,8 @@ describe("transformJSX", () => {
       const App = () => <Child count={5} />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [count])");
-    expect(result.code).not.toContain("() => count");
+    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.count])");
+    expect(result.code).not.toContain("() => props.count");
   });
 
   it("still wraps reactive signal props passed to components", () => {
@@ -1037,7 +1035,9 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
   });
 
   it("treats exported component props as reactive when no call sites exist", () => {
@@ -1048,7 +1048,9 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
   });
 
   it("treats exported component props as reactive even with local static call sites", () => {
@@ -1060,8 +1062,10 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
-    expect(result.code).not.toContain("_$createTemplate(_$tmpl_0, [title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
+    expect(result.code).not.toContain("_$createTemplate(_$tmpl_0, [props.title])");
   });
 
   it("still optimizes non-exported component props with local static call sites", () => {
@@ -1073,8 +1077,8 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
-    expect(result.code).not.toContain("() => title");
+    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+    expect(result.code).not.toContain("() => _$unwrap(props).title");
   });
 
   it("treats default exported cc(...) as reactive", () => {
@@ -1086,7 +1090,9 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
   });
 
   it("treats default export of a component variable as reactive", () => {
@@ -1099,7 +1105,9 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
   });
 
   it("tracks reactive children through transitive component calls", () => {
@@ -1119,7 +1127,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain(
-      "_$createTemplate(_$tmpl_0, [() => children])",
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children])",
     );
   });
 
@@ -1133,7 +1141,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain(
-      "_$createTemplate(_$tmpl_0, [() => children])",
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children])",
     );
   });
 
@@ -1148,7 +1156,9 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
   });
 
   it("tracks reactive props through spread", () => {
@@ -1164,7 +1174,9 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
   });
 
   it("treats children as reactive when an unknown spread is used", () => {
@@ -1179,7 +1191,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain(
-      "_$createTemplate(_$tmpl_0, [() => children])",
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children])",
     );
   });
 
@@ -1200,9 +1212,9 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     // user arrives as a getter (forwarded through Child), so member access
-    // must be unwrapped: _$unwrap(user).name
+    // must be unwrapped: _$unwrap(props).user.name
     expect(result.code).toContain(
-      "_$createTemplate(_$tmpl_0, [() => _$unwrap(user).name])",
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).user.name])",
     );
     expect(result.code).toContain(
       'import { unwrap as _$unwrap } from "sinwan/reactivity"',
@@ -1228,7 +1240,7 @@ describe("transformJSX", () => {
     // count arrives as a getter wrapping the signal; unwrap gets the signal,
     // then .value reads it. Unlike resolve, unwrap does NOT double-unwrap.
     expect(result.code).toContain(
-      "_$createTemplate(_$tmpl_0, [() => _$unwrap(count).value])",
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).count.value])",
     );
   });
 
@@ -1246,8 +1258,8 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
-    expect(result.code).not.toContain("() => title");
+    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+    expect(result.code).not.toContain("() => _$unwrap(props).title");
   });
 
   it("terminates with cyclic component references", () => {
@@ -1351,7 +1363,10 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
     expect(result.code).not.toContain("_$bindText(() => children)");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => children]");
+    expect(result.code).not.toContain("_$bindText(() => _$unwrap(props).children)");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children]",
+    );
   });
 
   it("warns when a quoted style string contains ${...}", () => {
@@ -1407,8 +1422,8 @@ describe("transformJSX", () => {
       const result = transformJSX(childCode, "/project/Child.tsx", {
         analyze: metaPath,
       });
-      expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
-      expect(result.code).not.toContain("() => title");
+      expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+      expect(result.code).not.toContain("() => _$unwrap(props).title");
     } finally {
       fs.unlinkSync(metaPath);
     }
@@ -1424,7 +1439,9 @@ describe("transformJSX", () => {
     const result = transformJSX(code, "/project/Child.tsx", {
       analyze: "/nonexistent/sinwan-reactive-props.json",
     });
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => title])");
+    expect(result.code).toContain(
+      "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
+    );
   });
 
   it("wraps reactive values passed to imported components at the call site", () => {
@@ -2699,7 +2716,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$unwrap(user)");
+    expect(result.code).toContain("_$unwrap(props).user");
   });
 
   it("reuses an existing unwrap import", () => {
@@ -2712,7 +2729,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$unwrap(user)");
+    expect(result.code).toContain("_$unwrap(props).user");
     expect(result.code).toContain("unwrap");
   });
 
@@ -2765,5 +2782,161 @@ describe("additional reactive wrap paths", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain("title={() => s.value}");
+  });
+});
+
+describe("live cc destructure", () => {
+  it("rewrites defaults, string keys, rest spreads, and shorthand", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Field = cc(({ value = "", "data-id": id, extra, ...rest }) => {
+        return <input data-id={id} value={value} data={{ extra }} {...rest} />;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("cc(props => {");
+    expect(result.code).toContain("_$createLiveRest(props,");
+    expect(result.code).toContain("..._$getSpreadProps(rest)");
+    expect(result.code).toContain('props["data-id"]');
+    expect(result.code).toContain('value={() => _$unwrap(props).value === void 0 ? "" : _$unwrap(props).value}');
+    expect(result.code).toContain("extra: _$unwrap(props).extra");
+    expect(result.code).toContain("createLiveRest as _$createLiveRest");
+    expect(result.code).toContain("getSpreadProps as _$getSpreadProps");
+  });
+
+  it("leaves nested destructure as a snapshot", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Child = cc(({ user: { name } }) => <p>{name}</p>);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("user: {");
+    expect(result.code).not.toContain("props.user");
+  });
+
+  it("leaves computed keys as a snapshot", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      const key = "title";
+      export const Child = cc(({ [key]: title }) => <h1>{title}</h1>);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("[key]: title");
+  });
+
+  it("spreads identifier props through getSpreadProps", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Box = cc((props) => <div {...props} />);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("{..._$getSpreadProps(props)}");
+  });
+
+  it("does not rewrite a nested function's shadowed props spread", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Box = cc((props) => {
+        const inner = (props) => <span {...props} />;
+        return <div {...props}>{inner({})}</div>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("<div {..._$getSpreadProps(props)}>");
+    expect(result.code).toContain("<span {...props} />");
+  });
+
+  it("picks a free props identifier when props is destructured", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Child = cc(({ props, _props }) => <span>{props}{_props}</span>);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("cc(_props1 =>");
+    expect(result.code).toContain("_$unwrap(_props1).props");
+    expect(result.code).toContain("_$unwrap(_props1)._props");
+  });
+
+  it("rewrites auto-cc destructure and copies TypeScript annotations", () => {
+    const code = `
+      export function Card({ title }: { title: string }) {
+        return <h1>{title}</h1>;
+      }
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("cc(function Card(props: {");
+    expect(result.code).toContain("_$unwrap(props).title");
+  });
+
+  it("merges helpers into an existing sinwan import", () => {
+    const code = `
+      import { cc } from "sinwan";
+      export const Box = cc((props) => <section {...props} />);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('from "sinwan"');
+    expect(result.code).toContain("getSpreadProps as _$getSpreadProps");
+    expect(result.code).toContain("{..._$getSpreadProps(props)}");
+  });
+
+  it("skips helper import when the local alias already exists", () => {
+    const code = `
+      import { cc, getSpreadProps as _$getSpreadProps } from "sinwan/component";
+      export const Box = cc((props) => <div {...props} />);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    const matches = result.code.match(/getSpreadProps as _\$getSpreadProps/g) ?? [];
+    expect(matches.length).toBe(1);
+    expect(result.code).toContain("{..._$getSpreadProps(props)}");
+  });
+
+  it("converts an expression-body rest destructure into a block", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Chip = cc(({ label, ...rest }) => <span {...rest}>{label}</span>);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("const rest = _$createLiveRest(props");
+    expect(result.code).toContain("return <span {..._$getSpreadProps(rest)}>");
+  });
+
+  it("tracks createLiveRest results as live prop bags", () => {
+    const code = `
+      import { cc, createLiveRest } from "sinwan/component";
+      export const Child = cc((props) => {
+        const rest = createLiveRest(props, ["value"]);
+        return <span>{rest.extra}</span>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("() => _$unwrap(rest).extra");
+  });
+
+  it("does not rewrite array-pattern cc params", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Row = cc(([item]) => <li>{item}</li>);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("cc(([item])");
+  });
+
+  it("ignores cc calls that are not functions", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      const nope = cc("x");
+      export const App = cc(() => <div />);
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain('cc("x")');
+  });
+
+  it("does not treat nested .children members as children passthrough", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      export const Menu = cc((props) => <div>{props.meta.children}</div>);
+    `;
+    const result = transformJSX(code, "test.tsx", { explicitBindings: true });
+    expect(result.code).toContain("_$bindText(() => _$unwrap(props).meta.children)");
   });
 });

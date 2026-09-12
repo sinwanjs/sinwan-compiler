@@ -31,6 +31,10 @@ See [Transform](transform.md) for wrapping rules and options.
 
 Mutates a Babel AST: wrap exported component-like functions with `cc(...)`. Returns `true` if anything changed. `transformJSX` already runs this.
 
+### `rewriteLiveCcDestructure(ast)`
+
+Mutates a Babel AST: rewrite flat `cc(({ value }) => …)` params to a `props` identifier and `{...props}` spreads to `getSpreadProps(props)`. Nested destructure is left as a snapshot. `transformJSX` already runs this before reactive wrap.
+
 ## Analysis
 
 ### `analyze(options)`

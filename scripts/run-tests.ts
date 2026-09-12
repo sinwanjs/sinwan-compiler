@@ -7,6 +7,7 @@ const files = [
   "cache.test.ts",
   "cli.test.ts",
   "exports.test.ts",
+  "live-cc-destructure.test.ts",
   "reactive-wrap-api.test.ts",
   "transform.test.ts",
 ].map((file) => path.join(testsDir, file));

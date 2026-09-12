@@ -7,15 +7,19 @@ If you are building a Sinwan app, start with [Plugins](plugins.md). If you are c
 ## Pipeline
 
 1. **Auto-`cc`** — exported functions that look like components (`App`, `Card`, …) are wrapped with `cc(...)` so the rest of the pipeline sees the same components the runtime will.
-2. **Reactive wrap** — JSX expressions that read signals, stores, `useState`, `useFetch`, `.value` on signals returned from other modules (`useTheme`, `inject`), or zero-arity getters returned from hooks (`counter()`) become `() => …` (or explicit binding helpers when that mode is on).
-3. **Template hoist** — static native-element trees become `_$createTemplate(...)` calls with slots for dynamic bits (`child`, `attr`, `event`, `ref`).
-4. **Analyze (optional)** — a project-wide pass marks which *exported* component props are actually reactive, so static strings are not wrapped.
+2. **Live destructure** — flat `cc(({ value }) => …)` becomes `cc((props) => …)` so `{value}` stays a live `props.value` read. `{...props}` spreads the raw bag.
+3. **Reactive wrap** — JSX expressions that read signals, stores, `useState`, `useFetch`, `.value` on signals returned from other modules (`useTheme`, `inject`), or zero-arity getters returned from hooks (`counter()`) become `() => …` (or explicit binding helpers when that mode is on).
+4. **Template hoist** — static native-element trees become `_$createTemplate(...)` calls with slots for dynamic bits (`child`, `attr`, `event`, `ref`).
+5. **Analyze (optional)** — a project-wide pass marks which *exported* component props are actually reactive, so static strings are not wrapped.
 
 ```text
 source.tsx
     │
     ▼
 autoWrapComponents()     plain `export function App()` → cc(App)
+    │
+    ▼
+rewriteLiveCcDestructure()  cc(({ value }) => …) → props.value
     │
     ▼
 wrapReactiveExpressions()   {count.value} → {() => count.value}

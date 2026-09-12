@@ -8,6 +8,7 @@
 
 import { parse } from "@babel/parser";
 import { autoWrapComponents } from "./auto-cc";
+import { rewriteLiveCcDestructure } from "./live-cc-destructure";
 import { wrapReactiveExpressions } from "./reactive-wrap";
 import _generate from "@babel/generator";
 const generate =
@@ -507,6 +508,9 @@ export function transformJSX(
   // components by the reactive analyzer. Must run before `wrapReactiveExpressions`
   // so the latter sees the `cc(...)` wrappers and processes their JSX.
   autoWrapComponents(ast, filename);
+
+  // Flatten `cc(({ value }) => …)` so wrap sees live `props.value` reads.
+  rewriteLiveCcDestructure(ast);
 
   // Wrap reactive JSX expressions so the runtime can track them.
   wrapReactiveExpressions(ast, {

@@ -279,6 +279,17 @@ function trackLocalScopeBindings(
       const init = p.node.init as t.Expression | undefined | null;
       if (!init) return;
 
+      if (
+        t.isIdentifier(id) &&
+        t.isCallExpression(init) &&
+        t.isIdentifier(init.callee) &&
+        (init.callee.name === "_$createLiveRest" ||
+          init.callee.name === "createLiveRest")
+      ) {
+        scope.bindings.set(id.name, { kind: "prop" });
+        return;
+      }
+
       const source = isReactiveSourceCall(init, names);
       if (source) {
         if (source.isArray) {
@@ -1067,10 +1078,40 @@ function wrapExpression(expr: t.Expression): t.Expression {
  * Build either a legacy zero-arity arrow function or a Phase 2 explicit
  * binding descriptor for a reactive JSX expression.
  */
+function isPropRoot(
+  expr: t.Expression,
+  scope: ReactiveScope,
+): boolean {
+  if (t.isIdentifier(expr)) {
+    return scope.bindings.get(expr.name)?.kind === "prop";
+  }
+  if (
+    t.isCallExpression(expr) &&
+    t.isIdentifier(expr.callee, { name: "_$unwrap" }) &&
+    expr.arguments.length === 1 &&
+    t.isIdentifier(expr.arguments[0])
+  ) {
+    return scope.bindings.get(expr.arguments[0].name)?.kind === "prop";
+  }
+  return false;
+}
+
+function isChildrenPropRead(
+  expr: t.Expression,
+  scope: ReactiveScope,
+): boolean {
+  if (t.isIdentifier(expr, { name: "children" })) return true;
+  if (!isMemberLike(expr) || expr.computed) return false;
+  if (!t.isIdentifier(expr.property, { name: "children" })) return false;
+  return isPropRoot(expr.object as t.Expression, scope);
+}
+
 function createBindingDescriptor(
   expr: t.Expression,
   exprPath: any,
   options: { explicitBindings?: boolean },
+  scope: ReactiveScope,
+  childrenGetter: boolean,
 ): t.Expression {
   if (!options.explicitBindings) {
     return wrapExpression(expr);
@@ -1101,12 +1142,13 @@ function createBindingDescriptor(
     ]);
   }
 
-  // Component children (and a bare `children` identifier on native hosts) are
-  // a node tree, not a string. `_$bindText` stringifies vnodes as
+  // Component children (and a `children` / `props.children` read on native
+  // hosts) are a node tree, not a string. `_$bindText` stringifies vnodes as
   // `[object Object]`. Keep a getter so the runtime can render text *or* nodes.
   const compInfo = getComponentExpressionInfo(exprPath);
   if (
-    t.isIdentifier(expr, { name: "children" }) ||
+    isChildrenPropRead(expr, scope) ||
+    childrenGetter ||
     (compInfo.isComponent && compInfo.attributeName === null)
   ) {
     return wrapExpression(expr);
@@ -1700,12 +1742,19 @@ export function wrapReactiveExpressions(
             // Before wrapping, replace prop-rooted member expressions (e.g.
             // `user.name`) with `resolve(user).name` so that getter-valued
             // props are unwrapped before member access at runtime.
+            const childrenGetter = isChildrenPropRead(expr, scope);
             if (transformPropMemberAccess(expr, scope)) {
               needsResolve = true;
             }
             exprPath.replaceWith(
               t.jsxExpressionContainer(
-                createBindingDescriptor(expr, exprPath, options),
+                createBindingDescriptor(
+                  expr,
+                  exprPath,
+                  options,
+                  scope,
+                  childrenGetter,
+                ),
               ),
             );
           }
