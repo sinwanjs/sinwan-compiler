@@ -1480,13 +1480,16 @@ export function wrapReactiveExpressions(
         }
       }
 
-      // Check for existing `unwrap` import from sinwan/reactivity
+      // Check for existing `_$unwrap` local from `sinwan/reactivity`.
+      // `import { unwrap }` is a different binding; generated code always
+      // calls `_$unwrap`, so only skip inject when that alias already exists.
       if (source === "sinwan/reactivity") {
         for (const spec of p.node.specifiers) {
           if (
             t.isImportSpecifier(spec) &&
             t.isIdentifier(spec.imported) &&
-            spec.imported.name === "unwrap"
+            spec.imported.name === "unwrap" &&
+            spec.local.name === RESOLVE_HELPER
           ) {
             hasUnwrapImport = true;
           }

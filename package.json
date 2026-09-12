@@ -1,6 +1,6 @@
 {
   "name": "sinwan-compiler",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Shared compiler core for Sinwan plugins",
   "type": "module",
   "main": "./dist/index.js",

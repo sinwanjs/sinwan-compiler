@@ -2,6 +2,21 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.3.1] — Unwrap Helper Alias
+
+sinwan-compiler 0.3.1 always injects `unwrap as _$unwrap` even when the file already imports `unwrap`. Pair with **sinwan 1.4.1** (Show/Portal skip remount) for sinwan-ui Presence overlays. CSS exit fill-mode is sinwan-ui, not this package.
+
+`Presence` `present` is still **not** a builtin wrap name (unlike `Show.when`). Overlay internals must pass a live getter: `present={() => api.open.value}`. `present={api.open.value}` snapshots closed.
+
+### Fixed
+
+- **`_$unwrap` helper import (`reactive-wrap.ts`)**: `import { unwrap }` from `sinwan/reactivity` no longer suppresses `import { unwrap as _$unwrap }`. Generated getters always call `_$unwrap`, so a same-export different local name left `ReferenceError: _$unwrap is not defined` (Combobox `defaultOpen={props.defaultOpen}`).
+
+### Internal
+
+- Transform regression that `import { unwrap }` still emits a separate `unwrap as _$unwrap` specifier.
+- `bun run test` — 266 pass / 0 fail. `src/` is 100% lines and functions.
+
 ## [0.3.0] — Live `cc` Destructure
 
 sinwan-compiler 0.3.0 rewrites flat `cc` / auto-`cc` object destructure so props stay live after Sinwan 1.4.0 unwraps zero-arity getters. Pair with **sinwan 1.4.0** (`createLiveRest` / `getSpreadProps`).

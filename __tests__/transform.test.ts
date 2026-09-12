@@ -1221,6 +1221,38 @@ describe("transformJSX", () => {
     );
   });
 
+  it("injects _$unwrap when unwrap is already imported under another local name", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { unwrap } from "sinwan/reactivity";
+      const Child = cc((props) => {
+        const raw = unwrap(props);
+        return <p>{props.user.name}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("const raw = unwrap(props)");
+    expect(result.code).toContain("_$unwrap(props).user.name");
+    expect(result.code).toContain(
+      'import { unwrap as _$unwrap } from "sinwan/reactivity"',
+    );
+  });
+
+  it("does not duplicate _$unwrap when the alias is already imported", () => {
+    const code = `
+      import { cc } from "sinwan/component";
+      import { unwrap as _$unwrap } from "sinwan/reactivity";
+      const Child = cc((props) => {
+        return <p>{props.user.name}</p>;
+      });
+    `;
+    const result = transformJSX(code, "test.tsx");
+    expect(result.code).toContain("_$unwrap(props).user.name");
+    expect(
+      result.code.match(/unwrap as _\$unwrap/g)?.length ?? 0,
+    ).toBe(1);
+  });
+
   it("tracks signal props through transitive component calls", () => {
     const code = `
       import { cc } from "sinwan/component";
@@ -2730,7 +2762,10 @@ describe("additional reactive wrap paths", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain("_$unwrap(props).user");
-    expect(result.code).toContain("unwrap");
+    expect(result.code).toContain("void unwrap");
+    expect(result.code).toContain(
+      'import { unwrap as _$unwrap } from "sinwan/reactivity"',
+    );
   });
 
   it("ignores invalid analyze metadata files", () => {
