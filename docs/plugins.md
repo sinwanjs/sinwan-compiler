@@ -55,7 +55,7 @@ The Vite plugin sets `resolve.dedupe: ["sinwan"]` for the same duplicate-runtime
 | `explicitBindings` | `false` | `_$bind*` helpers instead of bare `() =>` |
 | `analyze` | unset | Path to CLI JSON (production) |
 | `cache` | `true` | Incremental analyzer in dev. `false` turns it off. An object sets `root`, `tsConfigPath`, `bunfigPath`, `workspaces`, `cachePath` |
-| `fastRefresh` | `true` (Vite) | In-place component HMR in `vite serve` only |
+| `fastRefresh` | Bun: same as `dev`; Vite: `true` in `serve` | Per-component `import.meta.hot.accept` so routed/looked-up pages hot-update |
 
 ## Dev vs production
 
