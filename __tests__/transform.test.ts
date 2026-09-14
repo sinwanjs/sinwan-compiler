@@ -1,8 +1,1520 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as path from "path";
-import { COMPILER_TEMPLATE_SLOT_PROTOCOL, transformJSX } from "../src/transform";
+import {
+  COMPILER_TEMPLATE_SLOT_PROTOCOL,
+  transformJSX,
+} from "../src/transform";
 import { analyzeProject } from "../src/analyze";
+
+describe("derived local promotion", () => {
+  const compile = (body: string) =>
+    transformJSX(
+      `
+    import { cc, Show } from "sinwan/component";
+    import { signal } from "sinwan/reactivity";
+    export const App = cc(() => { ${body} });
+  `,
+      "derived.tsx",
+      { hoist: false, derivedLocals: true },
+    ).code;
+
+  it("promotes a reactive const and keeps Show lazy", () => {
+    const code = compile(`const count = signal(0); const open = count.value > 0;
+      return <Show when={open}><span>{open}</span></Show>;`);
+    expect(code).toContain("const open = () => count.value > 0;");
+    expect(code).toContain("when={() => open()}");
+    expect(code).toContain("{() => open()}");
+  });
+
+  it("rewrites late-panel dependency chains in declaration order", () => {
+    const code = compile(`const panels = signal([]);
+      const left = panels.value[0], right = panels.value[1];
+      const collapsed = left?.collapsed.value;
+      const open = collapsed && right?.collapsed.value === false;
+      return <Show when={open} />;`);
+    expect(code).toContain("left = () => panels.value[0]");
+    expect(code).toContain("right = () => panels.value[1]");
+    expect(code).toContain("const collapsed = () => left()?.collapsed.value;");
+    expect(code).toContain(
+      "const open = () => collapsed() && right()?.collapsed.value === false;",
+    );
+  });
+
+  it("rewrites ordinary reads, shorthand, closures and event bodies without truthy getters", () => {
+    const code =
+      compile(`const count = signal(0); const open: boolean = count.value > 0;
+      if (open) consume({ open });
+      const handle = () => consume(open);
+      function shadow(open) { return { open }; }
+      return <button onClick={handle} onInput={() => consume(open)}>{open ? "yes" : "no"}</button>;`);
+    expect(code).toContain("const open = (): boolean => count.value > 0;");
+    expect(code).toContain("if (open())");
+    expect(code).toContain("open: open()");
+    expect(code).toContain("const handle = () => consume(open());");
+    expect(code).toContain("onClick={handle}");
+    expect(code).toContain("onInput={() => consume(open())}");
+    expect(code).toContain("return {\n      open\n    };");
+  });
+
+  it("preserves static consts, containers, manual getters and mutable declarations", () => {
+    const code = compile(`const count = signal(0); const user = count;
+      const n = 1 + 2; const manual = () => count.value;
+      let snapshot = count.value; snapshot++;
+      return <Child user={user} n={n} manual={manual} snapshot={snapshot} />;`);
+    expect(code).toContain("const user = count;");
+    expect(code).toContain("const n = 1 + 2;");
+    expect(code).toContain("const manual = () => count.value;");
+    expect(code).toContain("let snapshot = count.value;");
+    expect(code).toContain("user={user}");
+  });
+
+  it("promotes reactive object and array literals with signal reads", () => {
+    const code = compile(`const size = signal(30);
+      const style = { flexBasis: \`\${size.value}%\`, flexGrow: 0 };
+      const list = [size.value, 70];
+      return <div style={style} data-sizes={list} />;`);
+    expect(code).toContain("const style = () => ({");
+    expect(code).toContain("flexBasis: \`\${size.value}%\`");
+    expect(code).toContain("const list = () => [size.value, 70];");
+    expect(code).toContain("style={() => style()}");
+    expect(code).toContain("data-sizes={() => list()}");
+  });
+
+  it("promotes calls to @sinwan-pure JSDoc-annotated imported functions", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-"));
+    const utilsPath = path.join(tmpDir, "utils.ts");
+    const componentPath = path.join(tmpDir, "comp.tsx");
+    fs.writeFileSync(
+      utilsPath,
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n/** @sinwan-pure */ export const merge = (...inputs: unknown[]): string => String(inputs);\n`,
+    );
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { cn, merge } from "./utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const handleClass = cn("base", size.value > 50 && "big");
+  const merged = merge("a", size.value > 50 && "b");
+  return <div class={handleClass} data-merge={merged} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const handleClass = () => cn(");
+      expect(result.code).toContain("class={() => handleClass()}");
+      expect(result.code).toContain("const merged = () => merge(");
+      expect(result.code).toContain("data-merge={() => merged()}");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("does not promote calls to non-@sinwan-pure or unresolvable imports", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-nopure-"));
+    const utilsPath = path.join(tmpDir, "utils.ts");
+    const componentPath = path.join(tmpDir, "comp.tsx");
+    fs.writeFileSync(
+      utilsPath,
+      `export function impure(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { impure } from "./utils";
+import { missing } from "./nonexistent";
+export const App = cc(() => {
+  const size = signal(30);
+  const handleClass = impure("base", size.value > 50 && "big");
+  return <div class={handleClass} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // impure is not @sinwan-pure annotated, so it should NOT be promoted
+      expect(result.code).toContain("const handleClass = impure(");
+      expect(result.code).not.toContain("const handleClass = () => impure(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("resolves @sinwan-pure from index files and handles unreadable/unparseable files", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-idx-"));
+    // index.ts in a subdirectory
+    const pkgDir = path.join(tmpDir, "pkg");
+    fs.mkdirSync(pkgDir);
+    fs.writeFileSync(
+      path.join(pkgDir, "index.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    // unreadable file (write then chmod 000)
+    const badPath = path.join(tmpDir, "bad.ts");
+    fs.writeFileSync(badPath, `/** @sinwan-pure */ export function x() {}\n`);
+    fs.chmodSync(badPath, 0o000);
+    // unparseable file
+    const brokenPath = path.join(tmpDir, "broken.ts");
+    fs.writeFileSync(brokenPath, `export function {{{\n`);
+    const componentPath = path.join(tmpDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { cn } from "./pkg";
+import { x } from "./bad";
+import { y } from "./broken";
+export const App = cc(() => {
+  const size = signal(30);
+  const handleClass = cn("base", size.value > 50 && "big");
+  return <div class={handleClass} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // cn from index.ts should be promoted
+      expect(result.code).toContain("const handleClass = () => cn(");
+    } finally {
+      fs.chmodSync(badPath, 0o644);
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("resolves @sinwan-pure from bare specifier node_modules packages", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-nm-"));
+    // Simulate a node_modules package with @sinwan-pure annotation
+    const nmDir = path.join(tmpDir, "node_modules", "clsx-lite");
+    fs.mkdirSync(nmDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir, "package.json"),
+      `{"name":"clsx-lite","main":"./dist/index.js","module":"./src/index.ts"}\n`,
+    );
+    fs.mkdirSync(path.join(nmDir, "src"));
+    fs.writeFileSync(
+      path.join(nmDir, "src", "index.ts"),
+      `/** @sinwan-pure */ export function clsxLite(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.mkdirSync(path.join(nmDir, "dist"));
+    fs.writeFileSync(
+      path.join(nmDir, "dist", "index.js"),
+      `/** @sinwan-pure */ export function clsxLite(...inputs) { return String(inputs); }\n`,
+    );
+    // Component importing the bare specifier
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { clsxLite } from "clsx-lite";
+export const App = cc(() => {
+  const size = signal(30);
+  const handleClass = clsxLite("base", size.value > 50 && "big");
+  return <div class={handleClass} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const handleClass = () => clsxLite(");
+      expect(result.code).toContain("class={() => handleClass()}");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("resolves @sinwan-pure from scoped packages with subpath exports", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-scoped-"),
+    );
+    const nmDir = path.join(tmpDir, "node_modules", "@scope", "utils");
+    fs.mkdirSync(nmDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir, "package.json"),
+      JSON.stringify({
+        name: "@scope/utils",
+        exports: {
+          "./merge": "./src/merge.ts",
+          ".": "./src/index.ts",
+        },
+      }) + "\n",
+    );
+    fs.mkdirSync(path.join(nmDir, "src"));
+    fs.writeFileSync(
+      path.join(nmDir, "src", "merge.ts"),
+      `/** @sinwan-pure */ export function merge(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.writeFileSync(
+      path.join(nmDir, "src", "index.ts"),
+      `export { merge } from "./merge";\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { merge } from "@scope/utils/merge";
+export const App = cc(() => {
+  const size = signal(30);
+  const handleClass = merge("base", size.value > 50 && "big");
+  return <div class={handleClass} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const handleClass = () => merge(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("does not promote bare specifier imports without @sinwan-pure", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-noann-"),
+    );
+    const nmDir = path.join(tmpDir, "node_modules", "no-ann");
+    fs.mkdirSync(nmDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir, "package.json"),
+      `{"name":"no-ann","main":"./index.js"}\n`,
+    );
+    fs.writeFileSync(
+      path.join(nmDir, "index.js"),
+      `export function helper(...inputs) { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { helper } from "no-ann";
+export const App = cc(() => {
+  const size = signal(30);
+  const handleClass = helper("base", size.value > 50 && "big");
+  return <div class={handleClass} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const handleClass = helper(");
+      expect(result.code).not.toContain("const handleClass = () => helper(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("follows re-exports from barrel files to find @sinwan-pure annotations", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-reexport-"),
+    );
+    // Original file with @sinwan-pure annotation
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n/** @sinwan-pure */ export const merge = (...inputs: unknown[]): string => String(inputs);\nexport function impure(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    // Barrel file that re-exports from utils.ts (no annotation here)
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "index.ts"),
+      `export { cn, merge, impure } from "./utils";\n`,
+    );
+    // Component importing from the barrel
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { cn, merge, impure } from "../lib";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = cn("base", size.value > 50 && "big");
+  const b = merge("base", size.value > 50 && "big");
+  const c = impure("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} data-c={c} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // cn and merge are @sinwan-pure in utils.ts, re-exported via index.ts
+      expect(result.code).toContain("const a = () => cn(");
+      expect(result.code).toContain("const b = () => merge(");
+      // impure is NOT annotated, so it should NOT be promoted
+      expect(result.code).toContain("const c = impure(");
+      expect(result.code).not.toContain("const c = () => impure(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("follows aliased re-exports (export { cn as merge } from)", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-alias-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "index.ts"),
+      `export { cn as className } from "./utils";\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { className } from "../lib";
+export const App = cc(() => {
+  const size = signal(30);
+  const cls = className("base", size.value > 50 && "big");
+  return <div class={cls} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // cn is aliased to className in the re-export, but still @sinwan-pure
+      expect(result.code).toContain("const cls = () => className(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("handles circular re-exports without infinite loops", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-circ-"));
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    // a.ts re-exports from b.ts, b.ts re-exports from a.ts (circular)
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "a.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\nexport { other } from "./b";\n`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "b.ts"),
+      `export { cn } from "./a";\n/** @sinwan-pure */ export function other(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "index.ts"),
+      `export { cn, other } from "./a";\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { cn, other } from "../lib";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = cn("base", size.value > 50 && "big");
+  const b = other("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => cn(");
+      expect(result.code).toContain("const b = () => other(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes default export function via default import", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-default-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "default-fn.ts"),
+      `/** @sinwan-pure */ export default function defaultHelper(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import defaultHelper from "../lib/default-fn";
+export const App = cc(() => {
+  const size = signal(30);
+  const cls = defaultHelper("base", size.value > 50 && "big");
+  return <div class={cls} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const cls = () => defaultHelper(");
+      expect(result.code).toContain("class={() => cls()}");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes default export arrow function via default import", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-default-arrow-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "default-arrow.ts"),
+      `/** @sinwan-pure */ export default (...inputs: unknown[]): string => String(inputs);\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import merge from "../lib/default-arrow";
+export const App = cc(() => {
+  const size = signal(30);
+  const cls = merge("base", size.value > 50 && "big");
+  return <div class={cls} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const cls = () => merge(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes default re-export via barrel file", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-default-reexport-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "helper.ts"),
+      `/** @sinwan-pure */ export default function defaultHelper(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "index.ts"),
+      `export { default } from "./helper";\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import defaultHelper from "../lib";
+export const App = cc(() => {
+  const size = signal(30);
+  const cls = defaultHelper("base", size.value > 50 && "big");
+  return <div class={cls} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const cls = () => defaultHelper(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes aliased default re-export (export { default as merge })", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-alias-default-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "helper.ts"),
+      `/** @sinwan-pure */ export default function defaultHelper(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "index.ts"),
+      `export { default as merge } from "./helper";\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { merge } from "../lib";
+export const App = cc(() => {
+  const size = signal(30);
+  const cls = merge("base", size.value > 50 && "big");
+  return <div class={cls} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const cls = () => merge(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes namespace import member calls (ns.cn())", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-namespace-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n/** @sinwan-pure */ export const merge = (...inputs: unknown[]): string => String(inputs);\nexport function impure(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import * as utils from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = utils.cn("base", size.value > 50 && "big");
+  const b = utils.merge("base", size.value > 50 && "big");
+  const c = utils.impure("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} data-c={c} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => utils.cn(");
+      expect(result.code).toContain("const b = () => utils.merge(");
+      // impure is NOT annotated — should not be promoted
+      expect(result.code).toContain("const c = utils.impure(");
+      expect(result.code).not.toContain("const c = () => utils.impure(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes class static method calls via @sinwan-pure on class", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-class-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export class PureUtils { static merge(...inputs: unknown[]): string { return String(inputs); } static format(...inputs: unknown[]): string { return String(inputs); } }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { PureUtils } from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = PureUtils.merge("base", size.value > 50 && "big");
+  const b = PureUtils.format("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => PureUtils.merge(");
+      expect(result.code).toContain("const b = () => PureUtils.format(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes object property calls via @sinwan-pure on const object", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-object-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export const helpers = { merge: (...inputs: unknown[]): string => String(inputs), format: (...inputs: unknown[]): string => String(inputs) };\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { helpers } from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = helpers.merge("base", size.value > 50 && "big");
+  const b = helpers.format("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => helpers.merge(");
+      expect(result.code).toContain("const b = () => helpers.format(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes default class export via default import (member calls)", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-default-class-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "default-class.ts"),
+      `/** @sinwan-pure */ export default class PureUtils { static merge(...inputs: unknown[]): string { return String(inputs); } }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import PureUtils from "../lib/default-class";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = PureUtils.merge("base", size.value > 50 && "big");
+  return <div class={a} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => PureUtils.merge(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes namespace import of class (ns.Utils.merge())", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-ns-class-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export class PureUtils { static merge(...inputs: unknown[]): string { return String(inputs); } }\n/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import * as utils from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = utils.cn("base", size.value > 50 && "big");
+  return <div class={a} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // ns.cn() should be promoted (function kind)
+      expect(result.code).toContain("const a = () => utils.cn(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("does not promote non-annotated default exports", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-no-default-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "default-fn.ts"),
+      `export default function defaultHelper(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import defaultHelper from "../lib/default-fn";
+export const App = cc(() => {
+  const size = signal(30);
+  const cls = defaultHelper("base", size.value > 50 && "big");
+  return <div class={cls} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const cls = defaultHelper(");
+      expect(result.code).not.toContain("const cls = () => defaultHelper(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("does not promote non-annotated class or object imports", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-no-class-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `export class Utils { static merge(...inputs: unknown[]): string { return String(inputs); } }\nexport const helpers = { merge: (...inputs: unknown[]): string => String(inputs) };\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { Utils, helpers } from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = Utils.merge("base", size.value > 50 && "big");
+  const b = helpers.merge("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = Utils.merge(");
+      expect(result.code).not.toContain("const a = () => Utils.merge(");
+      expect(result.code).toContain("const b = helpers.merge(");
+      expect(result.code).not.toContain("const b = () => helpers.merge(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("follows export * re-exports to find @sinwan-pure annotations", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-star-"));
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "source.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n/** @sinwan-pure */ export const merge = (...inputs: unknown[]): string => String(inputs);\nexport function impure(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "index.ts"),
+      `export * from "./source";\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { cn, merge, impure } from "../lib";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = cn("base", size.value > 50 && "big");
+  const b = merge("base", size.value > 50 && "big");
+  const c = impure("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} data-c={c} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => cn(");
+      expect(result.code).toContain("const b = () => merge(");
+      expect(result.code).toContain("const c = impure(");
+      expect(result.code).not.toContain("const c = () => impure(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes namespace import of class with nested member call (ns.Utils.merge())", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-ns-nested-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export class NSUtils { static merge(...inputs: unknown[]): string { return String(inputs); } static format(...inputs: unknown[]): string { return String(inputs); } }\n/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import * as ns from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = ns.NSUtils.merge("base", size.value > 50 && "big");
+  const b = ns.NSUtils.format("base", size.value > 50 && "big");
+  const c = ns.cn("base", size.value > 50 && "big");
+  const d = ns["cn"]("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} data-c={c} data-d={d} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => ns.NSUtils.merge(");
+      expect(result.code).toContain("const b = () => ns.NSUtils.format(");
+      expect(result.code).toContain("const c = () => ns.cn(");
+      expect(result.code).toContain('const d = () => ns["cn"](');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("does not promote computed member access with variable key (ns[key]())", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-computed-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import * as ns from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  const key = "cn";
+  const a = ns[key]("base", size.value > 50 && "big");
+  const b = ns[\`cn\`]("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // Computed member access with a variable key can't be statically resolved
+      expect(result.code).toContain("const a = ns[key](");
+      expect(result.code).not.toContain("const a = () => ns[key](");
+      // Template literal key is also not statically resolved
+      expect(result.code).toContain("const b = ns[`cn`](");
+      expect(result.code).not.toContain("const b = () => ns[`cn`](");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("workarounds: manual getter and computed for unsupported patterns", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-workarounds-"),
+    );
+    fs.mkdirSync(path.join(tmpDir, "lib"));
+    fs.writeFileSync(
+      path.join(tmpDir, "lib", "utils.ts"),
+      `/** @sinwan-pure */ export function cn(...inputs: unknown[]): string { return String(inputs); }\n/** @sinwan-pure */ export const helpers = { merge: (...inputs: unknown[]): string => String(inputs) };\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal, computed } from "sinwan/reactivity";
+import { cn, helpers } from "../lib/utils";
+import * as ns from "../lib/utils";
+export const App = cc(() => {
+  const size = signal(30);
+  // Auto-promoted — static import + @sinwan-pure
+  const a = cn("base", size.value > 50 && "big");
+  // Auto-promoted — namespace import + direct member access
+  const b = ns.cn("base", size.value > 50 && "big");
+  // Auto-promoted — string literal key
+  const c = ns["cn"]("base", size.value > 50 && "big");
+  // Auto-promoted — object member call
+  const d = helpers.merge("base", size.value > 50 && "big");
+  // Manual getter — for computed member access with variable key
+  const e = () => {
+    const key = "cn";
+    return ns[key]("base", size.value > 50 && "big");
+  };
+  // computed() — memoized, re-evaluates only when size.value changes
+  const f = computed(() => ns.cn("base", size.value > 50 && "big"));
+  return <div class={a} data-b={b} data-c={c} data-d={d} data-e={e} data-f={f} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // Auto-promoted cases
+      expect(result.code).toContain("const a = () => cn(");
+      expect(result.code).toContain("const b = () => ns.cn(");
+      expect(result.code).toContain('const c = () => ns["cn"](');
+      expect(result.code).toContain("const d = () => helpers.merge(");
+      // Manual getter — preserved as-is (not rewritten by compiler)
+      expect(result.code).toContain("const e = () =>");
+      // computed() — preserved as-is (already a getter)
+      expect(result.code).toContain("const f = computed(() => ns.cn(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("resolves @sinwan-pure via conditional exports and root index fallback", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-cond-"));
+    // Package with conditional exports
+    const nmDir1 = path.join(tmpDir, "node_modules", "cond-pkg");
+    fs.mkdirSync(nmDir1, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir1, "package.json"),
+      JSON.stringify({
+        name: "cond-pkg",
+        exports: {
+          ".": {
+            import: "./src/index.mts",
+            default: "./dist/index.js",
+          },
+        },
+      }) + "\n",
+    );
+    fs.mkdirSync(path.join(nmDir1, "src"));
+    fs.writeFileSync(
+      path.join(nmDir1, "src", "index.mts"),
+      `/** @sinwan-pure */ export function condMerge(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    // Package with only root index (no main/exports)
+    const nmDir2 = path.join(tmpDir, "node_modules", "root-index-pkg");
+    fs.mkdirSync(nmDir2, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir2, "package.json"),
+      `{"name":"root-index-pkg"}\n`,
+    );
+    fs.writeFileSync(
+      path.join(nmDir2, "index.ts"),
+      `/** @sinwan-pure */ export function rootMerge(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    // Package with subpath but no exports — falls back to src/ then dist/
+    const nmDir3 = path.join(tmpDir, "node_modules", "subpath-pkg");
+    fs.mkdirSync(nmDir3, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir3, "package.json"),
+      `{"name":"subpath-pkg","main":"./dist/index.js"}\n`,
+    );
+    fs.mkdirSync(path.join(nmDir3, "src"));
+    fs.writeFileSync(
+      path.join(nmDir3, "src", "helper.ts"),
+      `/** @sinwan-pure */ export function subHelper(...inputs: unknown[]): string { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { condMerge } from "cond-pkg";
+import { rootMerge } from "root-index-pkg";
+import { subHelper } from "subpath-pkg/helper";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = condMerge("base", size.value > 50 && "big");
+  const b = rootMerge("base", size.value > 50 && "big");
+  const c = subHelper("base", size.value > 50 && "big");
+  return <div class={a} data-b={b} data-c={c} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      expect(result.code).toContain("const a = () => condMerge(");
+      expect(result.code).toContain("const b = () => rootMerge(");
+      expect(result.code).toContain("const c = () => subHelper(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("resolves @sinwan-pure via plugin resolveImport callback for bare specifiers", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-cb-"));
+    const nmDir = path.join(tmpDir, "node_modules", "cb-pkg");
+    fs.mkdirSync(nmDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir, "package.json"),
+      `{"name":"cb-pkg","main":"./index.js"}\n`,
+    );
+    fs.writeFileSync(
+      path.join(nmDir, "index.js"),
+      `/** @sinwan-pure */ export function cbHelper(...inputs) { return String(inputs); }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { cbHelper } from "cb-pkg";
+export const App = cc(() => {
+  const size = signal(30);
+  const handleClass = cbHelper("base", size.value > 50 && "big");
+  return <div class={handleClass} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        {
+          derivedLocals: true,
+          hoist: false,
+          resolveImport: (source, _fromFile) => {
+            if (source === "cb-pkg") {
+              return path.join(nmDir, "index.js");
+            }
+            return null;
+          },
+        },
+      );
+      expect(result.code).toContain("const handleClass = () => cbHelper(");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("handles broken packages: missing package.json, invalid main, unresolvable subpaths", () => {
+    const tmpDir = fs.mkdtempSync(
+      path.join(import.meta.dir, "tmp-pure-broken-"),
+    );
+    // Package with no package.json
+    const nmDir1 = path.join(tmpDir, "node_modules", "no-pkg-json");
+    fs.mkdirSync(nmDir1, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir1, "index.ts"),
+      `/** @sinwan-pure */ export function noPkgHelper() { return ""; }\n`,
+    );
+    // Package with invalid JSON in package.json
+    const nmDir2 = path.join(tmpDir, "node_modules", "bad-json");
+    fs.mkdirSync(nmDir2, { recursive: true });
+    fs.writeFileSync(path.join(nmDir2, "package.json"), `{invalid json!!!\n`);
+    fs.writeFileSync(
+      path.join(nmDir2, "index.ts"),
+      `/** @sinwan-pure */ export function badJsonHelper() { return ""; }\n`,
+    );
+    // Package with main pointing to non-existent file, but src/ has it
+    const nmDir3 = path.join(tmpDir, "node_modules", "wrong-main");
+    fs.mkdirSync(nmDir3, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir3, "package.json"),
+      `{"name":"wrong-main","main":"./nonexistent.js"}\n`,
+    );
+    fs.mkdirSync(path.join(nmDir3, "src"));
+    fs.writeFileSync(
+      path.join(nmDir3, "src", "index.ts"),
+      `/** @sinwan-pure */ export function wrongMainHelper() { return ""; }\n`,
+    );
+    // Package with subpath that doesn't exist anywhere
+    const nmDir4 = path.join(tmpDir, "node_modules", "missing-sub");
+    fs.mkdirSync(nmDir4, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir4, "package.json"),
+      `{"name":"missing-sub","main":"./index.js"}\n`,
+    );
+    fs.writeFileSync(
+      path.join(nmDir4, "index.js"),
+      `export function existing() { return ""; }\n`,
+    );
+    // Package with conditional exports pointing to non-existent files
+    const nmDir5 = path.join(tmpDir, "node_modules", "cond-missing");
+    fs.mkdirSync(nmDir5, { recursive: true });
+    fs.writeFileSync(
+      path.join(nmDir5, "package.json"),
+      JSON.stringify({
+        name: "cond-missing",
+        exports: {
+          ".": {
+            import: "./nonexistent.mjs",
+            default: "./also-nonexistent.js",
+          },
+        },
+      }) + "\n",
+    );
+    fs.writeFileSync(
+      path.join(nmDir5, "index.ts"),
+      `/** @sinwan-pure */ export function condMissingHelper() { return ""; }\n`,
+    );
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir);
+    const componentPath = path.join(srcDir, "comp.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+import { noPkgHelper } from "no-pkg-json";
+import { badJsonHelper } from "bad-json";
+import { wrongMainHelper } from "wrong-main";
+import { missing } from "missing-sub/nonexistent";
+import { condMissingHelper } from "cond-missing";
+export const App = cc(() => {
+  const size = signal(30);
+  const a = noPkgHelper();
+  const b = badJsonHelper();
+  const c = wrongMainHelper();
+  const d = missing();
+  const e = condMissingHelper();
+  return <div class={a} data-b={b} data-c={c} data-d={d} data-e={e} />;
+});
+`,
+    );
+    try {
+      const result = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      );
+      // no-pkg-json: no package.json, so resolvePackageEntry returns null,
+      // but tryResolveBare walks up and finds the dir. Without package.json,
+      // resolvePackageEntry fails. So noPkgHelper should NOT be promoted.
+      expect(result.code).toContain("const a = noPkgHelper()");
+      // bad-json: invalid package.json, same issue
+      expect(result.code).toContain("const b = badJsonHelper()");
+      // wrong-main: main points to nonexistent, but exports field is absent,
+      // so falls through to root index. No root index exists, so not promoted.
+      // Actually, src/index.ts exists but we only check root index, not src/.
+      // So wrongMainHelper should NOT be promoted via main field.
+      // But wait — we check "source", "module", "main", "types" fields.
+      // main is "./nonexistent.js" which doesn't exist. No other fields.
+      // Then root index — no index at root. So not promoted.
+      expect(result.code).toContain("const c = wrongMainHelper()");
+      // missing-sub/nonexistent: subpath doesn't exist anywhere
+      expect(result.code).toContain("const d = missing()");
+      // cond-missing: conditional exports point to non-existent files,
+      // but root index.ts exists, so it falls through to root index
+      expect(result.code).toContain("const e = () => condMissingHelper()");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("does not defer side effects, hook initialization, writes or TDZ reads", () => {
+    const code = compile(`const count = signal(0);
+      const api = useApi(); const a = save(count.value); const b = count.value++;
+      const c = new Thing(count.value); const d = (consume(), count.value);
+      const object = count.value; object.name = "changed";
+      const early = later.value; const later = signal(1);
+      return <div>{a}{b}{c}{d}{object}{early}{api.value}</div>;`);
+    expect(code).toContain("const api = useApi();");
+    expect(code).toContain("const a = save(count.value);");
+    expect(code).toContain("const b = count.value++;");
+    expect(code).toContain("const c = new Thing(count.value);");
+    expect(code).toContain("const d = (consume(), count.value);");
+    expect(code).toContain("const object = count.value;");
+    expect(code).toContain("const early = later.value;");
+  });
+
+  it("does not promote module, helper, event, or render-callback locals", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+      const global = source.value;
+      function helper() { const local = source.value; return local; }
+      export const App = cc(() => <button onClick={() => { const clicked = source.value; consume(clicked); }}>
+        {items.map(() => { const item = source.value; return <i>{item}</i>; })}
+      </button>);`,
+      "derived.tsx",
+      { hoist: false, derivedLocals: true },
+    ).code;
+    for (const name of ["global", "local", "clicked", "item"]) {
+      expect(code).toContain(`const ${name} = source.value;`);
+    }
+  });
+
+  it("is opt-in and idempotent with and without template hoisting", () => {
+    const input = `import { cc } from "sinwan/component";
+      export const App = cc(() => { const open = source.value > 0; return <div title={open}>{open}</div>; });`;
+    expect(transformJSX(input, "derived.tsx", { hoist: false }).code).toContain(
+      "const open = source.value > 0;",
+    );
+    for (const hoist of [false, true]) {
+      for (const explicitBindings of [false, true]) {
+        const options = { hoist, explicitBindings, derivedLocals: true };
+        const first = transformJSX(input, "derived.tsx", options).code;
+        const second = transformJSX(first, "derived.tsx", options).code;
+        expect(second).toBe(first);
+      }
+    }
+  });
+
+  it("promotes live props, useState getters, coercions and typed expressions", () => {
+    const input = `import { cc } from "sinwan/component";
+      import { useState } from "sinwan/react";
+      export const App = cc(({ active }) => {
+        const [count] = useState(0);
+        const positive = count() > 0;
+        const enabled = active && positive;
+        const propOnly = active;
+        const text = String(count());
+        const number = Number(count());
+        const bool = Boolean(count());
+        const typed = (source.value as number) satisfies number;
+        return <div title={enabled} data-active={propOnly}>{positive}{text}{number}{bool}{typed}</div>;
+      });`;
+    const options = { derivedLocals: true, hoist: false };
+    const code = transformJSX(input, "derived.tsx", options).code;
+    expect(code).toContain("const positive = () => count() > 0;");
+    expect(code).toContain("const enabled = () => props.active && positive();");
+    expect(code).toContain("title={() => enabled()}");
+    expect(code).toContain("data-active={() => propOnly()}");
+    expect(code).toContain("const text = () => String(count());");
+    expect(code).toContain("const number = () => Number(count());");
+    expect(code).toContain("const bool = () => Boolean(count());");
+    expect(code).toContain(
+      "const typed = () => source.value as number satisfies number;",
+    );
+    expect(transformJSX(code, "derived.tsx", options).code).toBe(code);
+  });
+
+  it("warns about disabled promotion and setup if reads only in development", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const input = `import { cc } from "sinwan/component";
+      export const App = cc(() => {
+        const value = source.value;
+        const open = value > 0;
+        if (open) consume(value);
+        return <div>{open}</div>;
+      });`;
+    try {
+      transformJSX(input, "warn.tsx", { hoist: false });
+      expect(warn).not.toHaveBeenCalled();
+      transformJSX(input, "warn.tsx", { hoist: false, dev: true });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(
+        'derived local "open" snapshots',
+      );
+      warn.mockClear();
+      const code = transformJSX(input, "warn.tsx", {
+        hoist: false,
+        dev: true,
+        derivedLocals: true,
+      }).code;
+      expect(code).toContain("if (open())");
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(
+        "setup if is read once",
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps mutable captures, type queries, method receivers and unknown getters eager", () => {
+    const code = compile(`let index = 0;
+      const picked = panels.value[index];
+      const typed = source.value; type Value = typeof typed;
+      const list = source.value; list.push(1);
+      const local = () => source.value;
+      const called = local();
+      const method = api.read();
+      const bool = Boolean(...args);
+      const unused = source.value;
+      return <div>{picked}{typed}{list}{called}{method}{bool}</div>;`);
+    for (const fragment of [
+      "picked = panels.value[index]",
+      "typed = source.value",
+      "list = source.value",
+      "called = local()",
+      "method = api.read()",
+      "bool = Boolean(...args)",
+      "unused = source.value",
+    ]) {
+      expect(code).toContain(`const ${fragment};`);
+    }
+  });
+
+  it("preserves lexical identities across blocks, parameters, property keys and cc aliases", () => {
+    const code = transformJSX(
+      `import { cc as component } from "sinwan/component";
+      export const App = component(() => {
+        const value = source.value;
+        { const value = 3; consume(value); }
+        const handler = (value) => consume(value);
+        return <Child value={value} callback={handler} data={{ value }} />;
+      });`,
+      "derived.tsx",
+      { hoist: false, derivedLocals: true },
+    ).code;
+    expect(code).toContain("const value = () => source.value;");
+    expect(code).toContain("const value = 3;");
+    expect(code).toContain("consume(value);");
+    expect(code).toContain("value={() => value()}");
+    expect(code).toContain("value: value()");
+  });
+
+  it("leaves component tags, asserted write targets and direct eval scopes unchanged", () => {
+    const code = compile(`const Widget = registry.value;
+      const object = source.value; object!.name = "changed";
+      return <Widget object={object} />;`);
+    expect(code).toContain("const Widget = registry.value;");
+    expect(code).toContain("const object = source.value;");
+    const evaluated = compile(
+      `const value = source.value; eval("consume(value)"); return <div>{value}</div>;`,
+    );
+    expect(evaluated).toContain("const value = source.value;");
+  });
+
+  it("does not confuse shadowed factories or nested helper bindings with component setup", () => {
+    const shadowed = transformJSX(
+      `import { cc } from "sinwan/component";
+      function factory(cc) { return cc(() => { const value = source.value; return <div>{value}</div>; }); }
+      export { factory };`,
+      "derived.tsx",
+      { hoist: false, derivedLocals: true },
+    ).code;
+    expect(shadowed).toContain("const value = source.value;");
+    const code = compile(`const value = source.value;
+      function helper() { const source = () => 1; return source; }
+      return <div>{value}</div>;`);
+    expect(code).toContain("const value = () => source.value;");
+    expect(code).toContain("{() => value()}");
+  });
+
+  it("honors declaration and initializer snapshot pragmas", () => {
+    const code = compile(`const count = signal(0);
+      /* sinwan-snapshot */ const once = count.value;
+      const initial = /* sinwan-snapshot */ count.value;
+      const live = count.value;
+      return <div>{once}{initial}{live}</div>;`);
+    expect(code).toContain("const once = count.value;");
+    expect(code).toContain("const initial = /* sinwan-snapshot */count.value;");
+    expect(code).toContain("const live = () => count.value;");
+  });
+});
 
 describe("transformJSX", () => {
   it("hoists a fully static element", () => {
@@ -172,7 +1684,9 @@ describe("transformJSX", () => {
   it("hoists progress with a static value", () => {
     const code = `const Bar = () => <progress value="0.5" />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<progress value=\\"0.5\\"></progress>"');
+    expect(result.code).toContain(
+      'html: "<progress value=\\"0.5\\"></progress>"',
+    );
   });
 
   it("does not hoist link, meta, and title that must move into document.head", () => {
@@ -853,7 +2367,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("() => () =>");
-    expect(result.code).toContain("{() => checked.value ? \"On\" : \"Off\"}");
+    expect(result.code).toContain('{() => checked.value ? "On" : "Off"}');
   });
 
   it("wraps derived attributes on unknown imported components", () => {
@@ -1065,7 +2579,9 @@ describe("transformJSX", () => {
     expect(result.code).toContain(
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
-    expect(result.code).not.toContain("_$createTemplate(_$tmpl_0, [props.title])");
+    expect(result.code).not.toContain(
+      "_$createTemplate(_$tmpl_0, [props.title])",
+    );
   });
 
   it("still optimizes non-exported component props with local static call sites", () => {
@@ -1248,9 +2764,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toContain("_$unwrap(props).user.name");
-    expect(
-      result.code.match(/unwrap as _\$unwrap/g)?.length ?? 0,
-    ).toBe(1);
+    expect(result.code.match(/unwrap as _\$unwrap/g)?.length ?? 0).toBe(1);
   });
 
   it("tracks signal props through transitive component calls", () => {
@@ -1395,7 +2909,9 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
     expect(result.code).not.toContain("_$bindText(() => children)");
-    expect(result.code).not.toContain("_$bindText(() => _$unwrap(props).children)");
+    expect(result.code).not.toContain(
+      "_$bindText(() => _$unwrap(props).children)",
+    );
     expect(result.code).toContain(
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children]",
     );
@@ -1454,7 +2970,9 @@ describe("transformJSX", () => {
       const result = transformJSX(childCode, "/project/Child.tsx", {
         analyze: metaPath,
       });
-      expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+      expect(result.code).toContain(
+        "_$createTemplate(_$tmpl_0, [props.title])",
+      );
       expect(result.code).not.toContain("() => _$unwrap(props).title");
     } finally {
       fs.unlinkSync(metaPath);
@@ -2276,7 +3794,7 @@ describe("hook and inject signal wrapping", () => {
     expect(result.code).not.toContain("() => doubled.foo()");
     expect(result.code).not.toContain("() => helpers.x()");
     expect(result.code).not.toContain("() => n.foo()");
-    expect(result.code).not.toContain("() => format(\"x\").count()");
+    expect(result.code).not.toContain('() => format("x").count()');
     expect(result.code).toContain("make()");
     expect(result.code).not.toContain("() => make()");
   });
@@ -2833,7 +4351,9 @@ describe("live cc destructure", () => {
     expect(result.code).toContain("_$createLiveRest(props,");
     expect(result.code).toContain("..._$getSpreadProps(rest)");
     expect(result.code).toContain('props["data-id"]');
-    expect(result.code).toContain('value={() => _$unwrap(props).value === void 0 ? "" : _$unwrap(props).value}');
+    expect(result.code).toContain(
+      'value={() => _$unwrap(props).value === void 0 ? "" : _$unwrap(props).value}',
+    );
     expect(result.code).toContain("extra: _$unwrap(props).extra");
     expect(result.code).toContain("createLiveRest as _$createLiveRest");
     expect(result.code).toContain("getSpreadProps as _$getSpreadProps");
@@ -2920,7 +4440,8 @@ describe("live cc destructure", () => {
       export const Box = cc((props) => <div {...props} />);
     `;
     const result = transformJSX(code, "test.tsx");
-    const matches = result.code.match(/getSpreadProps as _\$getSpreadProps/g) ?? [];
+    const matches =
+      result.code.match(/getSpreadProps as _\$getSpreadProps/g) ?? [];
     expect(matches.length).toBe(1);
     expect(result.code).toContain("{..._$getSpreadProps(props)}");
   });
@@ -2972,6 +4493,8 @@ describe("live cc destructure", () => {
       export const Menu = cc((props) => <div>{props.meta.children}</div>);
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("_$bindText(() => _$unwrap(props).meta.children)");
+    expect(result.code).toContain(
+      "_$bindText(() => _$unwrap(props).meta.children)",
+    );
   });
 });

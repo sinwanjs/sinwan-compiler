@@ -122,7 +122,7 @@ Parse `analyze [root] [outFile] [--tsconfig] [--bunfig] [--workspaces]` and call
 
 | Name | Role |
 | ---- | ---- |
-| `collectExportedComponents(code)` | File-local exported component names (no `cc` required) |
+| `collectExportedComponents(code)` | File-local exported component names (no `cc` required). Skips type-only exports. |
 | `wrapReactiveExpressions(ast, options?)` | Reactive wrap without hoisting |
 | `trackReactiveImports(ast)` | Import-name sets for signals, `cc`, `useFetch`, … |
 | `collectComponentFunctions(ast, ccNames)` | `cc(...)` functions, names, and exports |

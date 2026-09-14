@@ -4,10 +4,11 @@
  * Shared utility for detecting top-level exported component bindings in a
  * module. Used by the Vite and Bun plugins for HMR boundary injection.
  *
- * Detection is intentionally conservative: only top-level exports whose name
- * starts with an uppercase letter (the component naming convention) are
- * returned. The runtime safely ignores anything that is not used as a
- * component, so over-matching is harmless.
+ * Detection is intentionally conservative: only top-level *value* exports
+ * whose name starts with an uppercase letter (the component naming
+ * convention) are returned. Type-only exports (`export type { Foo }`,
+ * `export { type Foo }`) must be skipped: HMR footers reference the local
+ * binding, and a type has no runtime binding (`ReferenceError`).
  */
 
 import { parse } from "@babel/parser";
@@ -21,6 +22,10 @@ export interface ExportedComponent {
 
 function isComponentName(name: string | undefined): name is string {
   return !!name && name[0] === name[0]!.toUpperCase() && /^[A-Z]/.test(name);
+}
+
+function isTypeOnlyExport(node: { exportKind?: string }): boolean {
+  return node.exportKind === "type";
 }
 
 /**
@@ -58,6 +63,7 @@ export function collectExportedComponents(
 
   for (const node of ast.program.body as any[]) {
     if (node.type === "ExportNamedDeclaration") {
+      if (isTypeOnlyExport(node)) continue;
       if (node.declaration) {
         const decl = node.declaration;
         if (
@@ -74,8 +80,9 @@ export function collectExportedComponents(
           }
         }
       } else if (node.specifiers && !node.source) {
-        // export { A, B as C }
+        // export { A, B as C } / export { Button, type ButtonProps }
         for (const spec of node.specifiers) {
+          if (isTypeOnlyExport(spec)) continue;
           if (
             spec.type === "ExportSpecifier" &&
             spec.local?.type === "Identifier" &&

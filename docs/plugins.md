@@ -48,14 +48,15 @@ The Vite plugin sets `resolve.dedupe: ["sinwan"]` for the same duplicate-runtime
 
 ## Shared plugin options
 
-| Option | Default | Role |
-| ------ | ------- | ---- |
-| `hoist` | `true` | Template hoisting |
-| `dev` | Bun: `NODE_ENV !== "production"` at `sinwan()`; Vite: `config.mode !== "production"` | Warn when hoisting is skipped. Pass `false` for library/`Bun.build` production bundles. |
-| `explicitBindings` | `false` | `_$bind*` helpers instead of bare `() =>` |
-| `analyze` | unset | Path to CLI JSON (production) |
-| `cache` | `true` | Incremental analyzer in dev. `false` turns it off. An object sets `root`, `tsConfigPath`, `bunfigPath`, `workspaces`, `cachePath` |
-| `fastRefresh` | Bun: same as `dev`; Vite: `true` in `serve` | Per-component `import.meta.hot.accept` so routed/looked-up pages hot-update |
+| Option             | Default                                                                              | Role                                                                                                                                                                                                                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hoist`            | `true`                                                                               | Template hoisting                                                                                                                                                                                                                                                                                          |
+| `derivedLocals`    | `false`                                                                              | Promote eligible component-local reactive constants to live getters; see [Transform](transform.md#derived-locals-opt-in). Supports `/** @sinwan-pure */` JSDoc-annotated imports; see [`@sinwan-pure` JSDoc contract](transform.md#sinwan-pure-jsdoc-contract). Requires compiler, plugin and runtime builds with this feature. |
+| `dev`              | Bun: `NODE_ENV !== "production"` at `sinwan()`; Vite: `config.mode !== "production"` | Warn when hoisting is skipped. Pass `false` for library/`Bun.build` production bundles.                                                                                                                                                                                                                    |
+| `explicitBindings` | `false`                                                                              | `_$bind*` helpers instead of bare `() =>`                                                                                                                                                                                                                                                                  |
+| `analyze`          | unset                                                                                | Path to CLI JSON (production)                                                                                                                                                                                                                                                                              |
+| `cache`            | `true`                                                                               | Incremental analyzer in dev. `false` turns it off. An object sets `root`, `tsConfigPath`, `bunfigPath`, `workspaces`, `cachePath`                                                                                                                                                                          |
+| `fastRefresh`      | Bun: same as `dev`; Vite: `true` in `serve`                                          | Per-component `import.meta.hot.accept` so routed/looked-up pages hot-update                                                                                                                                                                                                                                |
 
 ## Dev vs production
 

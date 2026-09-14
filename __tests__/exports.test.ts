@@ -88,4 +88,34 @@ export { App } from "./App.tsx";
     const result = collectExportedComponents(code, "test.tsx");
     expect(result).toHaveLength(0);
   });
+
+  test("skips export type specifiers that have no runtime binding", () => {
+    const code = `
+const Button = () => null;
+type ButtonProps = { variant?: string };
+export { Button };
+export type { ButtonProps };
+`;
+    const result = collectExportedComponents(code, "button.tsx");
+    expect(result).toEqual([{ local: "Button", key: "Button" }]);
+  });
+
+  test("skips inline type specifiers mixed with value exports", () => {
+    const code = `
+const Button = () => null;
+type ButtonProps = { variant?: string };
+export { Button, type ButtonProps };
+`;
+    const result = collectExportedComponents(code, "button.tsx");
+    expect(result).toEqual([{ local: "Button", key: "Button" }]);
+  });
+
+  test("returns empty for a type-only named export", () => {
+    const code = `
+type IconNode = [string, Record<string, string>][];
+export type { IconNode };
+`;
+    const result = collectExportedComponents(code, "icons.tsx");
+    expect(result).toHaveLength(0);
+  });
 });

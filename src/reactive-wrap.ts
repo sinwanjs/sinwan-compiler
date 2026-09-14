@@ -22,8 +22,14 @@
  */
 
 import * as t from "@babel/types";
-import _traverse from "@babel/traverse";
+import _traverse, {
+  type Binding as BabelBinding,
+  type NodePath,
+  type TraverseOptions,
+} from "@babel/traverse";
 import * as path from "path";
+import { parse } from "@babel/parser";
+import * as fs from "fs";
 
 const traverse =
   typeof _traverse === "function"
@@ -143,7 +149,408 @@ export function trackReactiveImports(ast: t.Node): ImportNames {
   return names;
 }
 
-// ─── Reactive binding kinds per scope ──────────────────────
+// ─── @sinwan-pure JSDoc import detection ─────────────────
+
+/**
+ * Kind of a pure export, determining how it can be called:
+ * - "function": direct call `cn(...)` — `export function cn()` or `export const cn = () =>`
+ * - "class": member call `Utils.merge(...)` — `export class Utils { static merge() }`
+ * - "object": member call `helpers.merge(...)` — `export const helpers = { merge: () => }`
+ */
+type PureExportKind = "function" | "class" | "object";
+
+/**
+ * Pure import info collected for the current file.
+ * - `direct`: local names of pure imported functions (named or default)
+ *   → `cn(...)` is a pure call
+ * - `namespace`: namespace local name → set of pure member names
+ *   → `ns.cn(...)` is a pure call when `cn` is in the set
+ * - `member`: local names of pure imported classes/objects
+ *   → `Utils.merge(...)` or `helpers.merge(...)` is a pure call (any member)
+ */
+interface PureImports {
+  direct: Set<string>;
+  namespace: Map<string, Set<string>>;
+  member: Set<string>;
+}
+
+const pureImportCache = new Map<string, Map<string, PureExportKind>>();
+const PURE_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".mts",
+  ".cts",
+];
+
+function tryResolveFile(base: string): string | null {
+  // If the path already has a recognized extension, check it directly.
+  if (PURE_EXTENSIONS.some((ext) => base.endsWith(ext))) {
+    try {
+      if (fs.existsSync(base)) return base;
+    } catch {}
+    return null;
+  }
+  for (const ext of PURE_EXTENSIONS) {
+    try {
+      if (fs.existsSync(base + ext)) return base + ext;
+    } catch {}
+  }
+  return null;
+}
+
+function tryResolveIndex(dir: string): string | null {
+  for (const ext of PURE_EXTENSIONS) {
+    try {
+      const candidate = path.join(dir, "index") + ext;
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Resolve a relative import (`./foo`, `../bar`) to a file path.
+ * Tries the exact path with extensions, then `index` in the directory.
+ */
+function tryResolveRelative(source: string, fromFile: string): string | null {
+  const base = path.resolve(path.dirname(fromFile), source);
+  return tryResolveFile(base) ?? tryResolveIndex(base);
+}
+
+/**
+ * Resolve a bare specifier (`clsx`, `sinwan/reactivity`, `@scope/pkg`)
+ * by walking up the directory tree looking for `node_modules/<pkg>`.
+ * Reads `package.json` to find the entry point (`exports`, `module`,
+ * `main`, `source`). Handles subpath exports (`pkg/sub`).
+ */
+function tryResolveBare(source: string, fromFile: string): string | null {
+  const parts = source.split("/");
+  const pkgName = source.startsWith("@")
+    ? `${parts[0]}/${parts[1]}`
+    : parts[0]!;
+  const subpath = parts.slice(source.startsWith("@") ? 2 : 1).join("/");
+
+  let dir = path.dirname(fromFile);
+  for (let i = 0; i < 30; i++) {
+    const nodeModules = path.join(dir, "node_modules", pkgName);
+    if (fs.existsSync(nodeModules)) {
+      return resolvePackageEntry(nodeModules, subpath);
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * Resolve a package entry point from its directory.
+ * Reads `package.json` and checks `exports`, `module`, `main`, `source`
+ * fields. For subpath exports, matches the `./subpath` key.
+ * Falls back to `src/` or `dist/` directories for source resolution.
+ */
+function resolvePackageEntry(pkgDir: string, subpath: string): string | null {
+  let pkgJson: Record<string, unknown>;
+  try {
+    pkgJson = JSON.parse(
+      fs.readFileSync(path.join(pkgDir, "package.json"), "utf-8"),
+    );
+  } catch {
+    return null;
+  }
+
+  // Try exports field — handles both subpath ("./sub") and main (".") keys,
+  // including conditional exports ({ import: "...", default: "..." }).
+  if (typeof pkgJson.exports === "object" && pkgJson.exports) {
+    const exports = pkgJson.exports as Record<
+      string,
+      string | Record<string, string>
+    >;
+    const exportKey = subpath ? `./${subpath}` : ".";
+    const entry = exports[exportKey];
+    if (typeof entry === "string") {
+      const resolved = tryResolveFile(path.resolve(pkgDir, entry));
+      if (resolved) return resolved;
+    } else if (entry && typeof entry === "object") {
+      // Conditional exports: { ".": { import: "./index.mjs", default: "./index.js" } }
+      for (const condValue of Object.values(entry)) {
+        if (typeof condValue === "string") {
+          const resolved = tryResolveFile(path.resolve(pkgDir, condValue));
+          if (resolved) return resolved;
+        }
+      }
+    }
+  }
+
+  // Try main exports for bare package name (no subpath)
+  if (!subpath) {
+    for (const field of ["source", "module", "main", "types"]) {
+      const entry = pkgJson[field];
+      if (typeof entry === "string") {
+        const resolved = tryResolveFile(path.resolve(pkgDir, entry));
+        if (resolved) return resolved;
+      }
+    }
+    // Try root index
+    const indexResolved = tryResolveIndex(pkgDir);
+    if (indexResolved) return indexResolved;
+  }
+
+  // Try common source directories for subpath or fallback
+  if (subpath) {
+    for (const srcDir of ["src", "dist", "."]) {
+      const base = path.join(pkgDir, srcDir, subpath);
+      const resolved = tryResolveFile(base) ?? tryResolveIndex(base);
+      if (resolved) return resolved;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Resolve any import — relative or bare specifier — to a file path.
+ * Uses `resolveImport` callback if provided (by plugins), otherwise
+ * falls back to direct filesystem resolution.
+ */
+function resolveAnyImport(
+  source: string,
+  fromFile: string,
+  resolveImport:
+    | ((source: string, fromFile: string) => string | null)
+    | undefined,
+): string | null {
+  if (resolveImport) {
+    try {
+      const resolved = resolveImport(source, fromFile);
+      if (resolved) return resolved;
+    } catch {}
+  }
+  if (source.startsWith(".")) {
+    return tryResolveRelative(source, fromFile);
+  }
+  return tryResolveBare(source, fromFile);
+}
+
+/**
+ * Scan a file for exported declarations annotated with @sinwan-pure JSDoc.
+ * Also follows re-exports: if `export { cn } from "./utils"` is found, the
+ * compiler resolves `./utils` and scans it recursively. This handles barrel
+ * files (`index.ts` re-exports from `utils.ts`).
+ *
+ * `resolveImport` is threaded through for re-export resolution. Without it,
+ * the compiler falls back to direct filesystem resolution.
+ *
+ * `depth` limits recursion to prevent infinite loops on circular re-exports.
+ */
+function scanPureExports(
+  filePath: string,
+  resolveImport?:
+    | ((source: string, fromFile: string) => string | null)
+    | undefined,
+  depth = 0,
+): Map<string, PureExportKind> {
+  const pure = new Map<string, PureExportKind>();
+  if (depth > 10) return pure; // prevent infinite re-export cycles
+  let code: string;
+  try {
+    code = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return pure;
+  }
+  let ast: t.Node;
+  try {
+    ast = parse(code, {
+      sourceType: "module",
+      plugins: ["jsx", "typescript"],
+      sourceFilename: filePath,
+    });
+  } catch {
+    return pure;
+  }
+  const hasPureJSDoc = (node: any): boolean =>
+    node?.leadingComments?.some(
+      (c: any) => c.type === "CommentBlock" && c.value.includes("@sinwan-pure"),
+    ) ?? false;
+
+  traverse(ast, {
+    ExportNamedDeclaration(p: any) {
+      // Case 1: Direct declaration with @sinwan-pure JSDoc
+      //   /** @sinwan-pure */ export function cn(...) {}   → "function"
+      //   /** @sinwan-pure */ export const merge = () =>   → "function"
+      //   /** @sinwan-pure */ export const helpers = { ... } → "object"
+      //   /** @sinwan-pure */ export class Utils { ... }    → "class"
+      if (hasPureJSDoc(p.node)) {
+        const decl = p.node.declaration;
+        if (t.isFunctionDeclaration(decl) && decl.id) {
+          pure.set(decl.id.name, "function");
+        } else if (t.isClassDeclaration(decl) && decl.id) {
+          pure.set(decl.id.name, "class");
+        } else if (t.isVariableDeclaration(decl)) {
+          for (const d of decl.declarations) {
+            if (!t.isIdentifier(d.id)) continue;
+            const init = d.init;
+            if (t.isObjectExpression(init)) {
+              pure.set(d.id.name, "object");
+            } else {
+              // Arrow function, function expression, or other — treat as function
+              pure.set(d.id.name, "function");
+            }
+          }
+        }
+      }
+
+      // Case 2: Re-export from another module
+      //   export { cn } from "./utils";
+      //   export { cn as merge } from "./utils";
+      //   export { default } from "./utils";
+      //   export { default as merge } from "./utils";
+      // The compiler resolves the source and scans it recursively.
+      const source = p.node.source?.value as string | undefined;
+      if (source && p.node.specifiers) {
+        const resolved = resolveAnyImport(source, filePath, resolveImport);
+        if (resolved) {
+          let reExportPure = pureImportCache.get(resolved);
+          if (!reExportPure) {
+            reExportPure = scanPureExports(resolved, resolveImport, depth + 1);
+            pureImportCache.set(resolved, reExportPure);
+          }
+          for (const spec of p.node.specifiers) {
+            if (!t.isExportSpecifier(spec)) continue;
+            const exported = t.isIdentifier(spec.exported)
+              ? spec.exported.name
+              : spec.exported.value;
+            const original = spec.local.name;
+            const kind = reExportPure.get(original);
+            if (kind) {
+              pure.set(exported, kind);
+            }
+          }
+        }
+      }
+    },
+    ExportDefaultDeclaration(p: any) {
+      // Case 3: Default export with @sinwan-pure JSDoc
+      //   /** @sinwan-pure */ export default function helper() {}  → "default" → "function"
+      //   /** @sinwan-pure */ export default () => {}              → "default" → "function"
+      //   /** @sinwan-pure */ export default class {}              → "default" → "class"
+      if (!hasPureJSDoc(p.node)) return;
+      const decl = p.node.declaration;
+      if (
+        t.isFunctionDeclaration(decl) ||
+        t.isArrowFunctionExpression(decl) ||
+        t.isFunctionExpression(decl)
+      ) {
+        pure.set("default", "function");
+      } else if (t.isClassDeclaration(decl)) {
+        pure.set("default", "class");
+      }
+    },
+    ExportAllDeclaration(p: any) {
+      // export * from "./utils"
+      // Re-exports ALL named exports from the source module.
+      // Resolve the source and add all its pure exports to this file.
+      const source = p.node.source?.value as string | undefined;
+      if (!source) return;
+      const resolved = resolveAnyImport(source, filePath, resolveImport);
+      if (!resolved) return;
+      let reExportPure = pureImportCache.get(resolved);
+      if (!reExportPure) {
+        reExportPure = scanPureExports(resolved, resolveImport, depth + 1);
+        pureImportCache.set(resolved, reExportPure);
+      }
+      for (const [name, kind] of reExportPure) {
+        if (name !== "default") {
+          pure.set(name, kind);
+        }
+      }
+    },
+  });
+  return pure;
+}
+
+function collectPureImports(
+  ast: t.Node,
+  filename: string | undefined,
+  resolveImport:
+    | ((source: string, fromFile: string) => string | null)
+    | undefined,
+): PureImports {
+  const result: PureImports = {
+    direct: new Set(),
+    namespace: new Map(),
+    member: new Set(),
+  };
+  if (!filename) return result;
+  const absoluteFilename = path.resolve(filename);
+  traverse(ast, {
+    ImportDeclaration(p: any) {
+      const source = p.node.source.value as string;
+      // Skip type-only imports — they don't produce runtime calls.
+      if (p.node.importKind === "type") return;
+      const resolved = resolveAnyImport(
+        source,
+        absoluteFilename,
+        resolveImport,
+      );
+      if (!resolved) return;
+      let filePure = pureImportCache.get(resolved);
+      if (!filePure) {
+        filePure = scanPureExports(resolved, resolveImport);
+        pureImportCache.set(resolved, filePure);
+      }
+      for (const spec of p.node.specifiers) {
+        if (t.isImportSpecifier(spec)) {
+          // Named import: import { cn } from "./utils"
+          // or aliased: import { cn as merge } from "./utils"
+          const imported = t.isIdentifier(spec.imported)
+            ? spec.imported.name
+            : spec.imported.value;
+          const kind = filePure.get(imported);
+          if (!kind) continue;
+          if (kind === "function") {
+            result.direct.add(spec.local.name);
+          } else {
+            // class or object — member call: Utils.merge(...)
+            result.member.add(spec.local.name);
+          }
+        } else if (t.isImportDefaultSpecifier(spec)) {
+          // Default import: import helper from "./utils"
+          const kind = filePure.get("default");
+          if (!kind) continue;
+          if (kind === "function") {
+            result.direct.add(spec.local.name);
+          } else {
+            // class or object — member call: helper.merge(...)
+            result.member.add(spec.local.name);
+          }
+        } else if (t.isImportNamespaceSpecifier(spec)) {
+          // Namespace import: import * as ns from "./utils"
+          // Any pure export is accessible as ns.cn(...)
+          const pureMembers = new Set<string>();
+          for (const [name, kind] of filePure) {
+            if (name === "default") continue; // default not accessible via namespace
+            if (kind === "function") {
+              pureMembers.add(name);
+            } else {
+              // class or object — ns.Utils.merge(...) is a nested member call.
+              // Track the class/object name so ns.Utils is recognized as pure.
+              pureMembers.add(name);
+            }
+          }
+          if (pureMembers.size > 0) {
+            result.namespace.set(spec.local.name, pureMembers);
+          }
+        }
+      }
+    },
+  });
+  return result;
+}
 
 type BindingKind = "mutable" | "signal" | "computed" | "getter" | "function";
 
@@ -268,12 +675,25 @@ function isUseFetchCall(expr: t.Expression, names: ImportNames): boolean {
 }
 
 function trackLocalScopeBindings(
-  path: any,
+  path: NodePath<t.Function>,
   names: ImportNames,
   scope: ReactiveScope,
+  shallow = false,
 ): void {
+  const collect = (visitors: TraverseOptions): void => {
+    path.traverse(
+      shallow
+        ? {
+            ...visitors,
+            Function(p) {
+              p.skip();
+            },
+          }
+        : visitors,
+    );
+  };
   // First pass: collect reactive source bindings (signals, mutables, getters).
-  path.traverse({
+  collect({
     VariableDeclarator(p: any) {
       const id = p.node.id as t.Node;
       const init = p.node.init as t.Expression | undefined | null;
@@ -343,7 +763,7 @@ function trackLocalScopeBindings(
 
   // Second pass: collect destructured bindings that derive from tracked mutable
   // objects. These behave the same as direct property reads on the root.
-  path.traverse({
+  collect({
     VariableDeclarator(p: any) {
       const id = p.node.id as t.Node;
       const init = p.node.init as t.Expression | undefined | null;
@@ -370,7 +790,7 @@ function trackLocalScopeBindings(
 
   // Third pass: collect local functions/arrow functions whose body contains
   // reactive reads. Calls to these functions in JSX should be wrapped too.
-  path.traverse({
+  collect({
     "FunctionDeclaration|VariableDeclarator"(p: any) {
       const node = p.node as t.FunctionDeclaration | t.VariableDeclarator;
       let fn: t.Function | null = null;
@@ -1078,10 +1498,7 @@ function wrapExpression(expr: t.Expression): t.Expression {
  * Build either a legacy zero-arity arrow function or a Phase 2 explicit
  * binding descriptor for a reactive JSX expression.
  */
-function isPropRoot(
-  expr: t.Expression,
-  scope: ReactiveScope,
-): boolean {
+function isPropRoot(expr: t.Expression, scope: ReactiveScope): boolean {
   if (t.isIdentifier(expr)) {
     return scope.bindings.get(expr.name)?.kind === "prop";
   }
@@ -1096,10 +1513,7 @@ function isPropRoot(
   return false;
 }
 
-function isChildrenPropRead(
-  expr: t.Expression,
-  scope: ReactiveScope,
-): boolean {
+function isChildrenPropRead(expr: t.Expression, scope: ReactiveScope): boolean {
   if (t.isIdentifier(expr, { name: "children" })) return true;
   if (!isMemberLike(expr) || expr.computed) return false;
   if (!t.isIdentifier(expr.property, { name: "children" })) return false;
@@ -1402,9 +1816,341 @@ export function propagateReactiveProps(
   return reactiveProps;
 }
 
+interface DerivedLocalOptions {
+  derivedLocals?: boolean;
+  dev?: boolean;
+  filename?: string;
+  resolveImport?: (source: string, fromFile: string) => string | null;
+}
+
+interface DerivedLocal {
+  declaration: NodePath<t.VariableDeclarator>;
+  binding: BabelBinding;
+}
+
+function hasSnapshotPragma(node: t.Node): boolean {
+  return (
+    node.leadingComments?.some((comment) =>
+      /\bsinwan-snapshot\b/.test(comment.value),
+    ) ?? false
+  );
+}
+
+function canRewriteDerivedReference(ref: NodePath): boolean {
+  if (
+    !ref.isIdentifier() ||
+    !ref.isReferencedIdentifier() ||
+    ref.findParent((p) => p.isTSType())
+  ) {
+    return false;
+  }
+  let target: NodePath = ref;
+  while (
+    ((target.parentPath?.isMemberExpression() ||
+      target.parentPath?.isOptionalMemberExpression()) &&
+      target.key === "object") ||
+    ((target.parentPath?.isTSNonNullExpression() ||
+      target.parentPath?.isTSAsExpression() ||
+      target.parentPath?.isTSTypeAssertion()) &&
+      target.key === "expression")
+  ) {
+    target = target.parentPath;
+  }
+  const parent = target.parentPath;
+  return !(
+    (parent?.isAssignmentExpression() && target.key === "left") ||
+    parent?.isUpdateExpression() ||
+    parent?.isUnaryExpression({ operator: "delete" }) ||
+    ((parent?.isForInStatement() || parent?.isForOfStatement()) &&
+      target.key === "left") ||
+    (target !== ref &&
+      (parent?.isCallExpression() || parent?.isOptionalCallExpression()) &&
+      target.key === "callee")
+  );
+}
+
+function isPureDerivedCall(
+  path: NodePath,
+  names: ImportNames,
+  pureImports: PureImports,
+): boolean {
+  if (!path.isCallExpression() && !path.isOptionalCallExpression())
+    return false;
+  const callee = path.node.callee;
+
+  // Member expression calls: Utils.merge(...), ns.cn(...), ns.Utils.merge(...)
+  if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
+    // Walk the member chain to collect the root identifier and all property names.
+    // e.g. ns.Utils.merge → root="ns", props=["Utils", "merge"]
+    // e.g. ns.cn → root="ns", props=["cn"]
+    // e.g. helpers.merge → root="helpers", props=["merge"]
+    const props: string[] = [];
+    let node: t.Node = callee;
+    while (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
+      const prop = node.property;
+      if (t.isIdentifier(prop)) {
+        props.unshift(prop.name);
+      } else if (t.isStringLiteral(prop)) {
+        props.unshift(prop.value);
+      } else {
+        return false; // computed member access — can't statically resolve
+      }
+      node = node.object;
+    }
+    if (!t.isIdentifier(node)) return false;
+    const root = node.name;
+
+    // Class/object member call: Utils.merge(...) where Utils is a pure import
+    if (pureImports.member.has(root)) {
+      return true;
+    }
+    // Namespace call: ns.cn(...) or ns.Utils.merge(...)
+    // If ANY property in the chain is in the pure set, the call is pure.
+    // - ns.cn() → cn is a pure function → pure call
+    // - ns.Utils.merge() → Utils is a pure class → any static method is pure
+    const nsMembers = pureImports.namespace.get(root);
+    if (nsMembers && props.some((p) => nsMembers.has(p))) {
+      return true;
+    }
+    return false;
+  }
+
+  if (!t.isIdentifier(callee)) return false;
+  const binding = path.scope.getBinding(callee.name);
+  if (!binding) {
+    return (
+      ["Boolean", "Number", "String"].includes(callee.name) &&
+      path.node.arguments.length === 1
+    );
+  }
+  // @sinwan-pure JSDoc-annotated imported functions (named or default) are
+  // treated as pure calls. Argument count is not restricted.
+  if (
+    (binding.path.isImportSpecifier() ||
+      binding.path.isImportDefaultSpecifier()) &&
+    pureImports.direct.has(callee.name)
+  ) {
+    return true;
+  }
+  if (path.node.arguments.length !== 0 || !binding.path.isVariableDeclarator())
+    return false;
+  const { id, init } = binding.path.node;
+  return (
+    t.isArrayPattern(id) &&
+    id.elements[0] === binding.identifier &&
+    t.isCallExpression(init) &&
+    t.isIdentifier(init.callee) &&
+    names.useState.has(init.callee.name) &&
+    binding.path.scope
+      .getBinding(init.callee.name)
+      ?.path.isImportSpecifier() === true
+  );
+}
+
+function isDerivedInitializer(
+  declaration: NodePath<t.VariableDeclarator>,
+  scope: ReactiveScope,
+  names: ImportNames,
+  derived: Map<BabelBinding, DerivedLocal>,
+  pureImports: PureImports,
+): boolean {
+  const init: NodePath<t.Expression | null | undefined> =
+    declaration.get("init");
+  init.assertExpression();
+  let safe = true;
+  let reactive = false;
+  const inspect = (path: NodePath): void => {
+    if (!safe || path.isTSType()) {
+      path.skip();
+      return;
+    }
+    const node = path.node;
+    if (path.isReferencedIdentifier()) {
+      const binding = path.scope.getBinding(path.node.name);
+      if (
+        binding &&
+        (!binding.constant ||
+          binding.kind === "let" ||
+          binding.kind === "var" ||
+          (binding.path.isVariableDeclarator() &&
+            (binding.path.node.start ?? -1) >=
+              (declaration.node.start ?? Infinity)))
+      ) {
+        safe = false;
+        return;
+      }
+      if (binding && derived.has(binding)) reactive = true;
+      if (isReactiveRead(node, scope)) reactive = true;
+    } else if (path.isMemberExpression() || path.isOptionalMemberExpression()) {
+      if (isReactiveRead(node, scope)) reactive = true;
+    } else if (path.isCallExpression() || path.isOptionalCallExpression()) {
+      if (!isPureDerivedCall(path, names, pureImports)) safe = false;
+      if (isGetterCall(path.node, scope)) reactive = true;
+    } else if (path.isSpreadElement()) {
+      // Spread elements inside object/array literals are safe only if the
+      // spread argument itself is a safe expression; the traverse will
+      // visit and validate the argument separately.
+    } else if (
+      !(
+        path.isIdentifier() ||
+        path.isLiteral() ||
+        path.isTemplateLiteral() ||
+        path.isTemplateElement() ||
+        path.isBinaryExpression() ||
+        path.isLogicalExpression() ||
+        path.isConditionalExpression() ||
+        path.isObjectExpression() ||
+        path.isObjectProperty() ||
+        path.isArrayExpression() ||
+        (path.isUnaryExpression() && path.node.operator !== "delete") ||
+        path.isTSAsExpression() ||
+        path.isTSSatisfiesExpression() ||
+        path.isTSNonNullExpression() ||
+        path.isTSTypeAssertion()
+      )
+    ) {
+      safe = false;
+    }
+  };
+  inspect(init);
+  if (safe) init.traverse({ enter: inspect });
+  return safe && reactive;
+}
+
+function promoteReactiveConstInitializers(
+  ast: t.Node,
+  options: DerivedLocalOptions,
+): void {
+  if (!options.derivedLocals && !options.dev) return;
+  const names = trackReactiveImports(ast);
+  const pureImports = collectPureImports(
+    ast,
+    options.filename,
+    options.resolveImport,
+  );
+  const { functions } = collectComponentFunctions(ast, names.cc);
+  // Re-crawl the program scope so bindings injected by autoWrapComponents
+  // (e.g. the `cc` import) are visible to the module-kind guard below.
+  traverse(ast, {
+    Program(p: NodePath<t.Program>) {
+      p.scope.crawl();
+    },
+  });
+  traverse(ast, {
+    Function(fnPath: NodePath<t.Function>) {
+      if (!functions.has(fnPath.node)) return;
+      const factory = fnPath.parentPath;
+      if (
+        !factory.isCallExpression() ||
+        !t.isIdentifier(factory.node.callee) ||
+        factory.scope.getBinding(factory.node.callee.name)?.kind !== "module"
+      )
+        return;
+      const body = fnPath.get("body");
+      if (!body.isBlockStatement()) return;
+      let hasDirectEval = false;
+      fnPath.traverse({
+        CallExpression(p) {
+          if (
+            t.isIdentifier(p.node.callee, { name: "eval" }) &&
+            !p.scope.getBinding("eval")
+          )
+            hasDirectEval = true;
+        },
+      });
+      if (hasDirectEval) return;
+      const scope: ReactiveScope = { bindings: new Map() };
+      trackPropBindings(
+        scope,
+        fnPath.node.params[0],
+        getAllPropNames(fnPath.node.params[0]),
+      );
+      trackLocalScopeBindings(fnPath, names, scope, true);
+      const derived = new Map<BabelBinding, DerivedLocal>();
+      for (const statement of body.get("body")) {
+        if (
+          !statement.isVariableDeclaration({ kind: "const" }) ||
+          hasSnapshotPragma(statement.node)
+        )
+          continue;
+        for (const declaration of statement.get("declarations")) {
+          const { id, init } = declaration.node;
+          if (
+            !t.isIdentifier(id) ||
+            !init ||
+            hasSnapshotPragma(declaration.node) ||
+            hasSnapshotPragma(init)
+          )
+            continue;
+          const binding = declaration.scope.getBinding(id.name)!;
+          if (
+            !binding.constant ||
+            !binding.referenced ||
+            !binding.referencePaths.every(canRewriteDerivedReference)
+          )
+            continue;
+          if (
+            isDerivedInitializer(
+              declaration,
+              scope,
+              names,
+              derived,
+              pureImports,
+            )
+          ) {
+            derived.set(binding, { declaration, binding });
+          }
+        }
+      }
+      for (const { declaration, binding } of derived.values()) {
+        const { id, init } = declaration.node;
+        if (!t.isIdentifier(id) || !t.isExpression(init)) continue;
+        const location = `${options.filename ?? "<module>"}:${id.loc?.start.line ?? 0}`;
+        if (!options.derivedLocals) {
+          if (
+            binding.referencePaths.some((ref) =>
+              ref.findParent((p) => p.isJSXExpressionContainer()),
+            )
+          ) {
+            console.warn(
+              `[Sinwan] ${location}: derived local "${id.name}" snapshots a reactive read used in JSX. Enable derivedLocals or use a getter/computed; use /* sinwan-snapshot */ for an intentional snapshot.`,
+            );
+          }
+          continue;
+        }
+        const getter = t.arrowFunctionExpression([], init);
+        if (t.isTSTypeAnnotation(id.typeAnnotation)) {
+          getter.returnType = id.typeAnnotation;
+          id.typeAnnotation = null;
+        }
+        declaration.node.init = getter;
+        for (const ref of binding.referencePaths) {
+          if (
+            options.dev &&
+            ref.parentPath?.isIfStatement() &&
+            ref.key === "test" &&
+            ref.getFunctionParent()?.node === fnPath.node
+          ) {
+            console.warn(
+              `[Sinwan] ${location}: derived local "${id.name}" in a setup if is read once, not a reactive branch. The compiler calls its getter to preserve boolean semantics; use Show for reactive control flow.`,
+            );
+          }
+          if (ref.parentPath?.isObjectProperty({ shorthand: true })) {
+            ref.parentPath.node.shorthand = false;
+          }
+          ref.replaceWith(t.callExpression(t.identifier(id.name), []));
+        }
+      }
+      fnPath.scope.crawl();
+    },
+  });
+}
+
 export function wrapReactiveExpressions(
   ast: t.Node,
   options: {
+    derivedLocals?: boolean;
+    dev?: boolean;
     explicitBindings?: boolean;
     analyze?: string;
     analyzeMetadata?: Map<string, Map<string, Set<string>>>;
@@ -1412,6 +2158,8 @@ export function wrapReactiveExpressions(
     filename?: string;
   } = {},
 ): void {
+  promoteReactiveConstInitializers(ast, options);
+
   // ─── Load metadata (not a traverse) ───────────────────────
   let metadata: Map<string, Map<string, Set<string>>> | null = null;
   if (options.analyzeMetadata) {
@@ -1582,7 +2330,19 @@ export function wrapReactiveExpressions(
     Function(p: any) {
       // Compute local scope bindings for this function
       const scope: ReactiveScope = { bindings: new Map() };
-      trackLocalScopeBindings(p, names, scope);
+      if (options.derivedLocals && componentFunctions.has(p.node)) {
+        trackPropBindings(
+          scope,
+          p.node.params[0],
+          getAllPropNames(p.node.params[0]),
+        );
+      }
+      trackLocalScopeBindings(
+        p,
+        names,
+        scope,
+        options.derivedLocals === true && componentFunctions.has(p.node),
+      );
       localScopes.set(p.node, scope);
     },
 

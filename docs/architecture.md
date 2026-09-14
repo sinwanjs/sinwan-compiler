@@ -23,6 +23,8 @@ transformJSX
   autoWrapComponents
   rewriteLiveCcDestructure  ← flat destructure stays live; raw JSX spreads
   wrapReactiveExpressions   ← analyze / analyzeMetadata / resolveImport
+    promoteReactiveConstInitializers ← opt-in derivedLocals, snapshot diagnostics
+    rebuild scopes / call graph / JSX wrapping
   hoist JSXElement roots    ← _$createTemplate + slots
 
 analyze / AnalyzerCache.update

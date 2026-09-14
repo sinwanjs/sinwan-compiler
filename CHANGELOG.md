@@ -2,6 +2,88 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [0.4.0] — @sinwan-pure JSDoc Annotation
+
+sinwan-compiler 0.4.0 extends `derivedLocals: true` with `@sinwan-pure` JSDoc annotation support. Imported functions annotated with `/** @sinwan-pure */` are recognized as safe pure calls, allowing the compiler to promote derived locals that call them — eliminating manual `() =>` getters for utility functions like `cn(...)`. Pair with **sinwan 1.5.1** (reactive child untrack + Virtual props resolve).
+
+```ts
+// lib/utils.ts
+/** @sinwan-pure */
+export function cn(...inputs: ClassValue[]): string {
+  return twMerge(clsx(inputs));
+}
+
+// comp.tsx — source stays clean, compiler auto-promotes
+import { cn } from "../lib/utils";
+const handleClass = cn("base", seamInactive && "hidden");
+
+// Compiled output — fully reactive, no manual getter
+const handleClass = () => cn("base", seamInactive() && "hidden");
+```
+
+### Added
+
+- **`@sinwan-pure` JSDoc annotation (`reactive-wrap.ts`)**: Exported functions and consts annotated with `/** @sinwan-pure */` are recognized as safe pure calls. The compiler resolves the import source, reads the file, parses it, and caches the result. Calls to annotated imports are treated as pure, allowing the containing `const` initializer to be promoted to a getter.
+- **Arbitrary import resolution**: All import types are scanned — relative imports (`./`, `../`), bare specifiers (`clsx`, `sinwan/reactivity`), scoped packages (`@scope/utils`), and subpath imports (`@scope/utils/merge`). The compiler walks up the directory tree to find `node_modules/<pkg>`, reads `package.json`, and resolves the entry point via `exports`, `module`, `main`, `source`, or `index` files. Extensions: `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.mts`, `.cts`.
+- **Plugin resolver forwarding**: When the `resolveImport` callback is provided by `bun-plugin-sinwan` or `vite-plugin-sinwan`, the compiler uses it for path resolution (handles tsconfig paths, bunfig aliases, workspace packages, and Bun/Vite module resolution). Otherwise, the compiler falls back to direct filesystem resolution.
+- **Re-export following**: Named re-exports (`export { cn } from`), aliased re-exports (`export { cn as merge } from`), default re-exports (`export { default } from`), aliased default re-exports (`export { default as merge } from`), and namespace re-exports (`export * from`) are all followed recursively. Circular re-exports are handled with a depth limit (10) to prevent infinite loops.
+- **Default export/import support**: `/** @sinwan-pure */ export default function helper()` and `import helper from "./utils"` are recognized. Default arrow functions and default class exports are also supported.
+- **Namespace import support**: `import * as ns from "./utils"` followed by `ns.cn(...)` is recognized. Nested member calls (`ns.Utils.merge()`) and string literal access (`ns["cn"]()`) are also supported.
+- **Class and object export support**: `/** @sinwan-pure */ export class Utils { static merge() }` and `/** @sinwan-pure */ export const helpers = { merge: () => }` are recognized. Any static method or property call on the imported binding is treated as pure.
+- **Object/array literal promotion**: Safe object and array literal initializers with reactive reads (e.g. `const panelStyle = { flexBasis: \`${size.value}%\` }`) are now promoted to getters.
+
+### Fixed
+
+- **Object/array literals rejected by `isDerivedInitializer`**: `ObjectExpression`, `ObjectProperty`, and `ArrayExpression` nodes were rejected as unsafe, preventing promotion of derived locals like `const panelStyle = { flexBasis: \`${size.value}%\` }`. These are now allowed when they contain only safe expressions.
+
+### Not scanned (by design)
+
+- **Dynamic imports** (`await import("./utils")`) — binding is runtime, not compile-time. Use a static import instead.
+- **`require()`** — CommonJS, not used in Sinwan's ESM target. Use a static ESM import instead.
+- **Computed member access with non-literal keys** (`ns[key]()` with variable keys, `ns[\`cn`]()` with template literals) — cannot statically resolve the property name. Use direct member access (`ns.cn()`) or string literal access (`ns["cn"]()`).
+
+### Internal
+
+- Compiler regressions: 28 new tests covering `@sinwan-pure` annotation detection, relative/bare/scoped/subpath imports, `node_modules` package resolution, `package.json` `exports`/`module`/`main`/`source` fields, conditional exports, root index fallback, broken packages (missing `package.json`, invalid JSON, wrong `main`, unresolvable subpaths), plugin `resolveImport` callback, barrel re-exports, aliased re-exports, circular re-exports, `export *` re-exports, default export/import, namespace import, class static methods, object property calls, default class exports, non-annotated imports, computed member access, and workarounds for unsupported patterns.
+- `bun run scripts/run-tests.ts` — 311 pass / 0 fail. `src/` is 100% lines and functions. `bun run typecheck` clean. `bun run build` clean.
+- Documentation updated in `docs/transform.md` (full `@sinwan-pure` contract, supported forms tables, workarounds section, complete demo), `docs/plugins.md`.
+
+## [0.3.2] — Derived Locals
+
+sinwan-compiler 0.3.2 adds opt-in `derivedLocals: true` promotion of setup-time derived `const` initializers to zero-arity getters, so locals that read signals stay reactive without authors writing `() => …` or `computed(…)`. Pair with **sinwan 1.5.0** (plain getter attribute hydration).
+
+```ts
+// Before — snapshots once at setup, never updates
+const leftCollapsed = leftPanel?.collapsed.value;
+const showStartExpand = !seamInactive && leftCollapsed && !rightCollapsed;
+<Show when={showStartExpand} />
+
+// After — with derivedLocals: true, the compiler promotes to live getters
+const leftCollapsed = () => leftPanel?.collapsed.value;
+const showStartExpand = () => !seamInactive && leftCollapsed() && !rightCollapsed;
+<Show when={() => showStartExpand()} />
+```
+
+### Added
+
+- **`derivedLocals` option (`reactive-wrap.ts`, `transform.ts`)**: When `true`, `promoteReactiveConstInitializers` rewrites eligible component-local `const` declarations whose initializers contain reactive reads (signal `.value`, store members, props, or references to already-promoted getters) into zero-arity arrow functions. Dependent references are rewritten to call the promoted getters so truthiness and ordinary reads keep their semantics. Opt-in; defaults remain off for compatibility.
+- **Declaration-chain promotion**: Initializers that reference already-promoted getters are rewritten to call them, preserving declaration order and reactive dependency chains.
+- **`/* sinwan-snapshot */` pragma**: Declarations or initializers carrying this comment are skipped, documenting intentional snapshots.
+- **Development diagnostics**: When `derivedLocals` is disabled and a derived reactive local is referenced from JSX, dev mode warns explaining the snapshot and how to opt in. A setup `if` read of a promoted getter warns that it is one-time control flow and recommends `Show` for reactive branching.
+- **Plugin forwarding (`bun-plugin-sinwan`, `vite-plugin-sinwan`)**: Both plugins forward `derivedLocals` to the compiler.
+
+### Fixed
+
+- **`collectExportedComponents` skips type-only exports (`exports.ts`)**: `export type { ButtonProps }` and `export { type Foo }` are not runtime bindings. Fast Refresh footers that called `$$sinwanReplace(ButtonProps, …)` threw `ReferenceError: ButtonProps is not defined` when linked UI source (for example `sinwan-ui` `button.tsx`) hot-reloaded with a demo page.
+- **Scope crawl after auto-cc (`reactive-wrap.ts`)**: `promoteReactiveConstInitializers` now re-crawls the program scope before the promotion traverse so the module-kind binding guard sees the `cc` import injected by `autoWrapComponents`. Without this, derived locals in auto-cc-wrapped components were not promoted.
+
+### Internal
+
+- Export-detection regressions for `export type { … }`, mixed `export { Value, type Type }`, and type-only modules.
+- Compiler regressions: 14 new derived-local tests covering basic promotion, late-panel chains, declaration order, ordinary reads, shorthand, closures, event bodies, props, `useState` getters, coercions, TypeScript assertions/satisfies, static constants, containers, manual getters, mutable declarations, side effects, hook init, writes, TDZ, module-level locals, helpers, callbacks, shadowing, component tags, `eval`, snapshot pragmas, disabled diagnostics, idempotence, hoisted/non-hoisted JSX, and explicit bindings on/off.
+- `bun run scripts/run-tests.ts` — 283 pass / 0 fail. `src/` is 100% lines and functions. `bun run typecheck` clean. `bun run build` clean.
+- Documentation updated in `docs/transform.md`, `docs/architecture.md`, `docs/plugins.md`.
+
 ## [0.3.1] — Unwrap Helper Alias
 
 sinwan-compiler 0.3.1 always injects `unwrap as _$unwrap` even when the file already imports `unwrap`. Pair with **sinwan 1.4.1** (Show/Portal skip remount) for sinwan-ui Presence overlays. CSS exit fill-mode is sinwan-ui, not this package.
@@ -121,7 +203,7 @@ sinwan-compiler 0.2.5 fixes stale reactive-prop metadata when a caller file is d
 
 ### Fixed
 
-- **Analyzer Cache Remove (`analyze.ts`)**: `AnalyzerCache.remove()` only recomputed files that imported the deleted module. Callers are the files that *pass* props, so a deleted parent left its children marked reactive. Remove now also recomputes modules the deleted file imported, then saves.
+- **Analyzer Cache Remove (`analyze.ts`)**: `AnalyzerCache.remove()` only recomputed files that imported the deleted module. Callers are the files that _pass_ props, so a deleted parent left its children marked reactive. Remove now also recomputes modules the deleted file imported, then saves.
 - **Cache Restore on Stale Spans (`analyze.ts`)**: Restoring a cache whose source no longer matched serialized callee spans threw `Failed to restore callee`. `restoreModule` now returns `null` and skips that module; the next `update` rebuilds it.
 - **Package Test Isolation (`scripts/run-tests.ts`)**: `bun test` from this package could pick up other workspace `cli.test.ts` files. `bun run test` now runs only `sinwan-compiler/__tests__` with coverage.
 

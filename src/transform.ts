@@ -24,6 +24,7 @@ const traverse =
     : ((_traverse as any).default ?? _traverse);
 
 export interface TransformOptions {
+  derivedLocals?: boolean;
   /** Enable template hoisting (default: true) */
   hoist?: boolean;
   /** Enable dev mode (source maps, etc.) */
@@ -514,6 +515,8 @@ export function transformJSX(
 
   // Wrap reactive JSX expressions so the runtime can track them.
   wrapReactiveExpressions(ast, {
+    derivedLocals: options.derivedLocals,
+    dev: options.dev,
     explicitBindings: options.explicitBindings,
     analyze: options.analyze,
     analyzeMetadata: options.analyzeMetadata,
@@ -600,7 +603,23 @@ export function transformJSX(
         ],
         t.stringLiteral("sinwan/renderer"),
       );
-      ast.program.body.unshift(bindingImport);
+      bindingImport.specifiers = bindingImport.specifiers.filter(
+        (candidate) =>
+          !ast.program.body.some(
+            (statement) =>
+              t.isImportDeclaration(statement) &&
+              statement.source.value === "sinwan/renderer" &&
+              statement.specifiers.some(
+                (specifier) =>
+                  t.isImportSpecifier(specifier) &&
+                  t.isIdentifier(specifier.imported) &&
+                  specifier.local.name === candidate.local.name &&
+                  specifier.imported.name === candidate.local.name,
+              ),
+          ),
+      );
+      if (bindingImport.specifiers.length > 0)
+        ast.program.body.unshift(bindingImport);
     }
     const result = generate(ast, {
       sourceMaps: true,
