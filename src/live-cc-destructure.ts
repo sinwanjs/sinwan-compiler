@@ -9,13 +9,8 @@
  * identifier use `getSpreadProps` so native attributes keep getter functions.
  */
 
-import * as t from "@babel/types";
-import _traverse from "@babel/traverse";
-
-const traverse =
-  typeof _traverse === "function"
-    ? _traverse
-    : ((_traverse as { default?: typeof _traverse }).default ?? _traverse);
+import * as t from "./ast/types";
+import { traverse, singlePath, type NodePath } from "./ast/traverse";
 
 const CC_SOURCE_MODULES = new Set(["sinwan", "sinwan/component"]);
 const LIVE_REST_LOCAL = "_$createLiveRest";
@@ -38,14 +33,13 @@ interface FlatPattern {
 function collectCcAliases(ast: t.Node): Set<string> {
   const aliases = new Set<string>();
   traverse(ast, {
-    ImportDeclaration(path: { node: t.ImportDeclaration }) {
-      const source = path.node.source.value;
+    ImportDeclaration(path) {
+      const source = path.node.source?.value;
+      if (typeof source !== "string") return;
       if (!CC_SOURCE_MODULES.has(source)) return;
-      for (const spec of path.node.specifiers) {
+      for (const spec of path.node.specifiers ?? []) {
         if (!t.isImportSpecifier(spec)) continue;
-        const imported = t.isIdentifier(spec.imported)
-          ? spec.imported.name
-          : spec.imported.value;
+        const imported = t.importedBindingName(spec.imported);
         if (imported === "cc") {
           aliases.add(spec.local.name);
         }
@@ -58,7 +52,7 @@ function collectCcAliases(ast: t.Node): Set<string> {
 function parseFlatObjectPattern(pattern: t.ObjectPattern): FlatPattern | null {
   const props: FlatProp[] = [];
   let rest: string | null = null;
-  for (const prop of pattern.properties) {
+  for (const prop of pattern.properties ?? []) {
     if (t.isRestElement(prop)) {
       if (!t.isIdentifier(prop.argument)) return null;
       rest = prop.argument.name;
@@ -66,6 +60,7 @@ function parseFlatObjectPattern(pattern: t.ObjectPattern): FlatPattern | null {
     }
     if (!t.isObjectProperty(prop) || prop.computed) return null;
     if (!t.isIdentifier(prop.key) && !t.isStringLiteral(prop.key)) return null;
+    if (!prop.value) return null;
     let value: t.Node = prop.value;
     let defaultValue: t.Expression | null = null;
     if (t.isAssignmentPattern(value)) {
@@ -95,11 +90,11 @@ function pickPropsName(used: Set<string>): string {
   return name;
 }
 
-function collectUsedNames(fnPath: { traverse: (visitors: object) => void }): Set<string> {
+function collectUsedNames(fnPath: NodePath): Set<string> {
   const used = new Set<string>();
   fnPath.traverse({
-    Identifier(p: { node: t.Identifier }) {
-      used.add(p.node.name);
+    Identifier(p) {
+      if (typeof p.node.name === "string") used.add(p.node.name);
     },
   });
   return used;
@@ -112,9 +107,10 @@ function memberAccess(
   if (t.isIdentifier(key)) {
     return t.memberExpression(t.identifier(propsName), t.identifier(key.name));
   }
+  const computedKey = t.isStringLiteral(key) ? key.value : String(key.value ?? "");
   return t.memberExpression(
     t.identifier(propsName),
-    t.stringLiteral(key.value),
+    t.stringLiteral(computedKey),
     true,
   );
 }
@@ -133,7 +129,9 @@ function liveRead(propsName: string, binding: FlatProp): t.Expression {
   );
 }
 
-function ensureBlockBody(fn: t.Function): t.BlockStatement {
+function ensureBlockBody(
+  fn: t.Function,
+): t.Node & { type: "BlockStatement"; body: t.Node[] } {
   if (t.isBlockStatement(fn.body)) return fn.body;
   const body = t.blockStatement([t.returnStatement(fn.body as t.Expression)]);
   fn.body = body;
@@ -210,9 +208,9 @@ function ensureComponentImport(
   for (const stmt of ast.program.body) {
     if (!t.isImportDeclaration(stmt)) continue;
     if (hasLocalSpecifier(stmt, local)) return;
-    if (stmt.source.value === "sinwan/component") {
+    if (t.moduleSourceValue(stmt.source) === "sinwan/component") {
       target = stmt;
-    } else if (stmt.source.value === "sinwan" && target === null) {
+    } else if (t.moduleSourceValue(stmt.source) === "sinwan" && target === null) {
       target = stmt;
     }
   }
@@ -232,8 +230,11 @@ function copyPatternType(pattern: t.ObjectPattern, id: t.Identifier): void {
 }
 
 function rewriteFunctionDestructure(
-  fnPath: any,
+  fnPath: NodePath,
 ): { rest: boolean; spread: boolean } {
+  if (!t.isFunction(fnPath.node)) {
+    return { rest: false, spread: false };
+  }
   const fn = fnPath.node;
   const param = fn.params[0];
   if (!param) {
@@ -321,10 +322,12 @@ export function rewriteLiveCcDestructure(ast: t.Node): {
     CallExpression(path: any) {
       const callee = path.node.callee;
       if (!t.isIdentifier(callee) || !aliases.has(callee.name)) return;
-      const firstArg = path.node.arguments[0];
-      if (!firstArg || !t.isFunction(firstArg)) return;
-      const argPaths = path.get("arguments") as any[];
-      const fnPath = argPaths[0];
+      const argPaths = path.get("arguments");
+      let fnPath = Array.isArray(argPaths) ? argPaths[0] : argPaths;
+      if (!fnPath) return;
+      while (t.isParenthesizedExpression(fnPath.node)) {
+        fnPath = singlePath(fnPath.get("expression"));
+      }
       const result = rewriteFunctionDestructure(fnPath);
       needsRest = needsRest || result.rest;
       needsSpread = needsSpread || result.spread;

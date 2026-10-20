@@ -11,7 +11,9 @@
  * binding, and a type has no runtime binding (`ReferenceError`).
  */
 
-import { parse } from "@babel/parser";
+import { parse } from "./ast/parse";
+import type { File } from "./ast/node";
+import * as t from "./ast/types";
 
 export interface ExportedComponent {
   /** Local binding name in the module (referenced in the accept callback). */
@@ -28,11 +30,20 @@ function isTypeOnlyExport(node: { exportKind?: string }): boolean {
   return node.exportKind === "type";
 }
 
+function isIdent(n: unknown): n is { type: "Identifier"; name: string } {
+  return (
+    !!n &&
+    typeof n === "object" &&
+    (n as { type?: string }).type === "Identifier" &&
+    typeof (n as { name?: unknown }).name === "string"
+  );
+}
+
 /**
  * Collect top-level exported component bindings from a module source string.
  *
- * Parses the source with Babel, then walks top-level export declarations to
- * find functions and variables whose name starts with an uppercase letter.
+ * Parses the source with oxc-parser, then walks top-level export declarations
+ * to find functions and variables whose name starts with an uppercase letter.
  *
  * Returns an array of `{ local, key }` pairs. Returns an empty array if the
  * source cannot be parsed.
@@ -41,7 +52,7 @@ export function collectExportedComponents(
   code: string,
   filename: string,
 ): ExportedComponent[] {
-  let ast: any;
+  let ast: File;
   try {
     ast = parse(code, {
       sourceType: "module",
@@ -61,32 +72,40 @@ export function collectExportedComponents(
     found.push({ local, key });
   };
 
-  for (const node of ast.program.body as any[]) {
+  for (const node of ast.program.body) {
     if (node.type === "ExportNamedDeclaration") {
       if (isTypeOnlyExport(node)) continue;
-      if (node.declaration) {
-        const decl = node.declaration;
+      const declaration = node.declaration as
+        | { type: string; id?: unknown; declarations?: Array<{ id?: unknown }> }
+        | null
+        | undefined;
+      if (declaration) {
         if (
-          decl.type === "FunctionDeclaration" &&
-          decl.id &&
-          isComponentName(decl.id.name)
+          declaration.type === "FunctionDeclaration" &&
+          isIdent(declaration.id) &&
+          isComponentName(declaration.id.name)
         ) {
-          add(decl.id.name, decl.id.name);
-        } else if (decl.type === "VariableDeclaration") {
-          for (const d of decl.declarations) {
-            if (d.id?.type === "Identifier" && isComponentName(d.id.name)) {
+          add(declaration.id.name, declaration.id.name);
+        } else if (declaration.type === "VariableDeclaration") {
+          for (const d of declaration.declarations ?? []) {
+            if (isIdent(d.id) && isComponentName(d.id.name)) {
               add(d.id.name, d.id.name);
             }
           }
         }
       } else if (node.specifiers && !node.source) {
         // export { A, B as C } / export { Button, type ButtonProps }
-        for (const spec of node.specifiers) {
+        for (const spec of node.specifiers as Array<{
+          type: string;
+          exportKind?: string;
+          local?: unknown;
+          exported?: unknown;
+        }>) {
           if (isTypeOnlyExport(spec)) continue;
           if (
             spec.type === "ExportSpecifier" &&
-            spec.local?.type === "Identifier" &&
-            spec.exported?.type === "Identifier" &&
+            isIdent(spec.local) &&
+            isIdent(spec.exported) &&
             isComponentName(spec.exported.name)
           ) {
             add(spec.local.name, spec.exported.name);
@@ -94,11 +113,23 @@ export function collectExportedComponents(
         }
       }
     } else if (node.type === "ExportDefaultDeclaration") {
-      const decl = node.declaration;
-      if (decl.type === "Identifier") {
-        add(decl.name, "default");
-      } else if (decl.type === "FunctionDeclaration" && decl.id) {
-        add(decl.id.name, "default");
+      const raw = node.declaration;
+      const declaration = (
+        raw && typeof raw === "object" && "type" in raw
+          ? t.unwrapParens(raw as t.Node)
+          : raw
+      ) as {
+        type: string;
+        name?: string;
+        id?: unknown;
+      };
+      if (isIdent(declaration)) {
+        add(declaration.name, "default");
+      } else if (
+        declaration.type === "FunctionDeclaration" &&
+        isIdent(declaration.id)
+      ) {
+        add(declaration.id.name, "default");
       }
     }
   }

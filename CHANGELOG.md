@@ -2,6 +2,37 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.0.0] — Oxc Compiler, Nested Hoist, and `sinway` Stores
+
+sinwan-compiler 1.0.0 replaces Babel with oxc-parser and esrap, hoists native elements inside list and conditional expressions, and follows Sinwan 2.0.0’s public entries. Pair with **sinwan 2.0.0**. `transformJSX`, analyze, and the plugin options stay the same.
+
+### Breaking
+
+- **Babel removed (`package.json`, `src/ast/`)**: Parse, walk, and print no longer use `@babel/parser`, `@babel/traverse`, `@babel/types`, or `@babel/generator`. The compiler depends on `oxc-parser` and `esrap`. Public `transformJSX` and analyze behavior is unchanged. Printed code can differ in parentheses, quotes, and whitespace.
+- **Store reads come from `sinway` (`reactive-wrap.ts`)**: `createMutable` and `createStore` are recognized on `import … from "sinway"`. `sinwan/store` is no longer a reactive source. Sinwan 2.0.0 removed that entry.
+- **Hoist helpers import `sinwan/renderer/web` (`transform.ts`)**: `_$createTemplate`, `_$bindText`, `_$bindAttr`, and the other hoist bindings are imported from `sinwan/renderer/web`, not `sinwan/renderer`.
+
+### Added
+
+- **Nested template hoist (`transform.ts`)**: A native element inside an expression (`<For>{(row) => <tr/>}</For>`, `{cond && <span/>}`, `.map` callbacks) is hoisted on its own. A fragment does not block that hoist, so `<For>{(row) => <><td/></></For>}` hoists the cell. A native child written directly under another element still belongs to the parent template.
+- **Parent-fill child slots (`transform.ts`)**: When an element’s only meaningful child is one dynamic expression, one component, or one enhancer, the template omits the `<!--s:N-->` marker and points the child slot at that element. A fragment around that only child is transparent (`<div><>{name}</></div>`). A fragment with siblings keeps markers, so `<div><>{name}</>tail</div>` stays in source order. Mixed static and dynamic children still use markers.
+
+### Fixed
+
+- **JSX comments stay comments (`src/ast/parse.ts`, `transform.ts`)**: `{/* note */}` is not printed as text. Inside a hoisted element it becomes an HTML comment (`<!-- note -->`). A block comment after the last child of a function or object stays on that container, so it cannot mark the next export `@sinwan-pure`.
+- **Derived locals keep real bindings (`src/ast/path.ts`)**: Loop bindings, `catch` parameters, `switch` consts, function names, and class method keys are not rewritten into calls. `import type` is not a value binding. A `typeof` query in a type position does not freeze the const. `import.meta` does not abort the pass.
+- **Optional prop chains unwrap (`reactive-wrap.ts`)**: `props.user?.name` compiles to `_$unwrap(props).user?.name`. An optional call through a pure import, such as `helpers?.merge(count.value)`, can still be promoted when `derivedLocals` is on.
+- **Namespaced attributes stay in hoisted HTML (`transform.ts`)**: `xlink:href` and `xml:lang` are written into the template.
+- **Renderer helper imports are reused (`transform.ts`)**: An existing `_$createTemplate` or `_$bind*` import from `sinwan/renderer` or `sinwan/renderer/web` is not imported again.
+- **Parentheses still wrap (`auto-cc.ts`, `live-cc-destructure.ts`, `exports.ts`, `analyze.ts`)**: `export const Foo = (() => <div/>)` is auto-wrapped with `cc`. The same unwrap applies to live destructure, export collection, and analyze.
+- **Parse stays JSX and TypeScript for every script extension (`src/ast/parse.ts`)**: `.js`, `.jsx`, `.ts`, and `.tsx` parse as TSX, matching the 0.4.0 Babel plugins.
+- **Dynamic `class` and `on*` omit empty placeholders (`transform.ts`)**: Hoisted HTML does not emit ` class=""` or ` onclick=""`. The client binds those slots by path. Server rendering inserts the attribute when the placeholder is absent. Static `class="card"` is unchanged.
+
+### Internal
+
+- `src/ast/` is the parse, Path/Scope, and print facade. Optional chains (`ChainExpression`) and parentheses (`ParenthesizedExpression`) are unwrapped in the reactive walks.
+- Docs: `docs/architecture.md`, `docs/api.md`, `docs/transform.md`.
+
 ## [0.4.0] — @sinwan-pure JSDoc Annotation
 
 sinwan-compiler 0.4.0 extends `derivedLocals: true` with `@sinwan-pure` JSDoc annotation support. Imported functions annotated with `/** @sinwan-pure */` are recognized as safe pure calls, allowing the compiler to promote derived locals that call them — eliminating manual `() =>` getters for utility functions like `cn(...)`. Pair with **sinwan 1.5.1** (reactive child untrack + Virtual props resolve).

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { parse } from "@babel/parser";
-import * as t from "@babel/types";
+import { parse } from "../src/ast/parse";
+import * as t from "../src/ast/types";
 import { rewriteLiveCcDestructure } from "../src/live-cc-destructure";
 
 function parseModule(code: string) {
@@ -18,6 +18,14 @@ function exportedCcFunction(ast: ReturnType<typeof parseModule>): t.Function {
 }
 
 describe("rewriteLiveCcDestructure", () => {
+  it("ignores cc calls with no arguments", () => {
+    const ast = parseModule(`
+      import { cc } from "sinwan/component";
+      const Child = cc();
+    `);
+    expect(rewriteLiveCcDestructure(ast)).toEqual({ rest: false, spread: false });
+  });
+
   it("is a no-op without a cc import", () => {
     const ast = parseModule(`const Child = cc(({ value }) => value);`);
     const result = rewriteLiveCcDestructure(ast);

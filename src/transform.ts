@@ -6,22 +6,11 @@
  * and replaced with optimized template creation calls.
  */
 
-import { parse } from "@babel/parser";
 import { autoWrapComponents } from "./auto-cc";
 import { rewriteLiveCcDestructure } from "./live-cc-destructure";
 import { wrapReactiveExpressions } from "./reactive-wrap";
-import _generate from "@babel/generator";
-const generate =
-  typeof _generate === "function"
-    ? _generate
-    : ((_generate as any).default ?? _generate);
-import * as t from "@babel/types";
-import _traverse from "@babel/traverse";
-// Handle CJS/ESM interop — @babel/traverse default may be nested
-const traverse =
-  typeof _traverse === "function"
-    ? _traverse
-    : ((_traverse as any).default ?? _traverse);
+import { parse, generate, traverse, t } from "./ast";
+
 
 export interface TransformOptions {
   derivedLocals?: boolean;
@@ -161,32 +150,34 @@ function htmlAttributeName(attrName: string): string {
   return attrName;
 }
 
-function jsxAttrName(
-  attr: t.JSXAttribute | t.JSXSpreadAttribute,
-): string | undefined {
-  if (attr.type !== "JSXAttribute" || attr.name.type !== "JSXIdentifier") {
-    return undefined;
+export function jsxAttrName(attr: t.Node): string | undefined {
+  if (attr.type !== "JSXAttribute") return undefined;
+  const n = attr.name;
+  if (!n || typeof n === "string") return undefined;
+  if (n.type === "JSXIdentifier") {
+    return typeof n.name === "string" ? n.name : undefined;
   }
-  return attr.name.name;
+  if (n.type === "JSXNamespacedName") {
+    const namespace = n.namespace as { name: string };
+    const name = n.name as { name: string };
+    return `${namespace.name}:${name.name}`;
+  }
 }
 
-function hasAttr(
-  attributes: t.JSXOpeningElement["attributes"],
-  name: string,
-): boolean {
-  for (const attr of attributes) {
+function hasAttr(attributes: t.Node[] | undefined, name: string): boolean {
+  for (const attr of attributes ?? []) {
     if (jsxAttrName(attr) === name) return true;
   }
   return false;
 }
 
 function attrIsExpression(
-  attributes: t.JSXOpeningElement["attributes"],
+  attributes: t.Node[] | undefined,
   name: string,
 ): boolean {
-  for (const attr of attributes) {
+  for (const attr of attributes ?? []) {
     if (attr.type !== "JSXAttribute" || jsxAttrName(attr) !== name) continue;
-    return attr.value?.type === "JSXExpressionContainer";
+    return t.isNode(attr.value) && attr.value.type === "JSXExpressionContainer";
   }
   return false;
 }
@@ -197,8 +188,10 @@ function attrIsExpression(
  * surrounding native shell can still be hoisted.
  */
 function elementNeedsJsxEnhancer(node: t.JSXElement): boolean {
-  const tagName = jsxNameToString(node.openingElement.name);
-  const attrs = node.openingElement.attributes;
+  const opening = node.openingElement;
+  if (!t.isJSXOpeningElement(opening)) return false;
+  const tagName = jsxNameToString(opening.name);
+  const attrs = opening.attributes;
   switch (tagName) {
     case "select":
       return hasAttr(attrs, "defaultValue") || hasAttr(attrs, "value");
@@ -278,8 +271,8 @@ function toKebabCase(value: string): string {
 
 function serializeStyleValue(expr: t.Expression): string {
   if (t.isStringLiteral(expr)) return expr.value;
-  if (t.isTemplateLiteral(expr) && expr.expressions.length === 0) {
-    return expr.quasis[0]?.value?.raw ?? "";
+  if (t.isTemplateLiteral(expr) && (expr.expressions ?? []).length === 0) {
+    return t.templateElementRaw((expr.quasis ?? [])[0]);
   }
   if (!t.isObjectExpression(expr)) return "";
 
@@ -314,7 +307,8 @@ function elementToHtml(
   filename: string,
   counter: SlotCounter,
 ): string {
-  const tagName = jsxNameToString(node.openingElement.name);
+  const opening = node.openingElement;
+  const tagName = jsxNameToString(opening?.name);
   if (tagName === "") return "";
   // The root element passed to extractTemplate is guaranteed lowercase by
   // transformJSX (it skips capitalized tags). Capitalized children are handled
@@ -328,11 +322,12 @@ function elementToHtml(
   let html = `<${tagName}`;
   let textareaDefault = "";
 
-  for (const attr of node.openingElement.attributes) {
+  for (const attr of opening?.attributes ?? []) {
     if (attr.type === "JSXSpreadAttribute") {
       throw new Error("Cannot hoist element with spread attributes");
     }
-    const attrName = attr.name.name;
+    const attrName = jsxAttrName(attr);
+    if (!attrName) continue;
     if (attrName === "children") continue;
     if (attrName === "ref") {
       if (attr.value?.type === "JSXExpressionContainer") {
@@ -369,12 +364,16 @@ function elementToHtml(
         name: attrName,
         expr,
       });
-      html += ` ${htmlName}=""`;
+      // class / on* bind at runtime. Empty placeholders would be cloned on
+      // every row. SSR inserts the attribute when this placeholder is absent.
+      if (attrName !== "class" && !attrName.startsWith("on")) {
+        html += ` ${htmlName}=""`;
+      }
       continue;
     }
     if (
       attr.value?.type === "JSXText" ||
-      attr.value?.type === "StringLiteral"
+      t.isStringLiteral(attr.value)
     ) {
       const rawValue = attr.value.value;
       if (attrName === "style") {
@@ -412,6 +411,42 @@ function elementToHtml(
   return html;
 }
 
+/**
+ * When an element’s only meaningful child is one dynamic expression or one
+ * component/enhancer island, bind via the parent element path and omit the
+ * `<!--s:N-->` comment. That saves two Comment nodes per bench row (id + label).
+ * Mixed static+dynamic children still use markers so sibling indices stay stable.
+ */
+function getSoleDynamicChild(children: any[]): any | null {
+  const meaningful: any[] = [];
+  for (const child of children) {
+    if (child.type === "JSXText") {
+      if (cleanJSXText(child.value ?? "")) meaningful.push(child);
+      continue;
+    }
+    if (child.type === "JSXExpressionContainer") {
+      if (child.expression.type === "JSXEmptyExpression") continue;
+      meaningful.push(child);
+      continue;
+    }
+    if (child.type === "JSXElement" || child.type === "JSXFragment") {
+      meaningful.push(child);
+    }
+  }
+  if (meaningful.length !== 1) return null;
+  const only = meaningful[0];
+  if (only.type === "JSXFragment") return getSoleDynamicChild(only.children);
+  if (only.type === "JSXExpressionContainer") return only;
+  if (only.type === "JSXElement") {
+    const childTag = jsxIdentifierTagName(only.openingElement?.name);
+    const isComponent =
+      !!childTag && childTag.charAt(0) === childTag.charAt(0).toUpperCase();
+    if (isComponent || elementNeedsJsxEnhancer(only)) return only;
+    return null;
+  }
+  return null;
+}
+
 function childrenToHtml(
   children: any[],
   slots: TemplateSlot[],
@@ -419,7 +454,32 @@ function childrenToHtml(
   filename: string,
   startIndex: number,
   counter: SlotCounter,
+  allowParentFill = true,
 ): { html: string; childIndex: number } {
+  // Parent-fill only for an element's own child list. A fragment shares the
+  // parent path, so filling it would steal later siblings.
+  if (allowParentFill && startIndex === 0) {
+    const sole = getSoleDynamicChild(children);
+    if (sole != null) {
+      // Keep marker id ordinals aligned with child-slot order for SSR.
+      counter.value++;
+      if (sole.type === "JSXExpressionContainer") {
+        slots.push({
+          path: [...path],
+          type: "child",
+          expr: sole.expression,
+        });
+      } else {
+        slots.push({
+          path: [...path],
+          type: "child",
+          expr: sole,
+        });
+      }
+      return { html: "", childIndex: 0 };
+    }
+  }
+
   let html = "";
   let childIndex = startIndex;
   for (const child of children) {
@@ -430,7 +490,21 @@ function childrenToHtml(
         childIndex++;
       }
     } else if (child.type === "JSXExpressionContainer") {
-      if (child.expression.type === "JSXEmptyExpression") continue;
+      if (child.expression.type === "JSXEmptyExpression") {
+        const comments = [
+          ...(child.expression.leadingComments ?? []),
+          ...(child.leadingComments ?? []),
+        ];
+        for (const comment of comments) {
+          if (
+            comment?.type === "CommentBlock" &&
+            typeof comment.value === "string"
+          ) {
+            html += `<!--${comment.value.replace(/--/g, "")}-->`;
+          }
+        }
+        continue;
+      }
       const slot = nextSlotId(counter);
       slots.push({
         path: [...path, childIndex],
@@ -440,14 +514,7 @@ function childrenToHtml(
       html += slot;
       childIndex++;
     } else if (child.type === "JSXElement") {
-      const childName = child.openingElement.name;
-      // Component calls (capitalized tags) cannot be hoisted into static HTML.
-      // Instead, emit a child slot whose dynamic value is the JSX element
-      // itself. The runtime child-slot branch in _$createTemplate routes it
-      // through renderNodeToDOM, which handles functional components. This
-      // lets the static shell (native tags around the component) be hoisted
-      // and reused across renders while the component call stays dynamic.
-      const childTag = childName.type === "JSXIdentifier" ? childName.name : "";
+      const childTag = jsxIdentifierTagName(child.openingElement?.name);
       const isFirstCharUpper =
         childTag && childTag.charAt(0) === childTag.charAt(0).toUpperCase();
       if (isFirstCharUpper || elementNeedsJsxEnhancer(child)) {
@@ -477,6 +544,7 @@ function childrenToHtml(
         filename,
         childIndex,
         counter,
+        false,
       );
       html += fragResult.html;
       childIndex = fragResult.childIndex;
@@ -485,12 +553,55 @@ function childrenToHtml(
   return { html, childIndex };
 }
 
-function jsxNameToString(name: any): string {
-  if (name.type === "JSXIdentifier") return name.name;
-  if (name.type === "JSXMemberExpression") {
+function jsxNameToString(name: unknown): string {
+  if (t.isJSXIdentifier(name)) return name.name;
+  if (t.isJSXMemberExpression(name)) {
     return jsxNameToString(name.object) + "." + jsxNameToString(name.property);
   }
   return "";
+}
+
+function jsxIdentifierTagName(name: unknown): string {
+  return t.isJSXIdentifier(name) ? name.name : "";
+}
+
+function rendererHelperImported(body: t.Node[], local: string): boolean {
+  for (const statement of body) {
+    if (!t.isImportDeclaration(statement)) continue;
+    const source = t.moduleSourceValue(statement.source);
+    if (source !== "sinwan/renderer" && source !== "sinwan/renderer/web") {
+      continue;
+    }
+    for (const specifier of statement.specifiers ?? []) {
+      if (
+        t.isImportSpecifier(specifier) &&
+        t.isIdentifier(specifier.local) &&
+        specifier.local.name === local
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * True when this element is a structural child of a parent JSXElement /
+ * JSXFragment (the parent template would serialize it into HTML).
+ *
+ * False when a JSXExpressionContainer appears first — the element is a
+ * dynamic island root (For/Show children, `&&`, `.map` callbacks) and may
+ * be hoisted independently. Fragments are transparent, so a root fragment
+ * or a fragment inside an expression does not block that hoist.
+ */
+function isStructuralJsxChild(path: any): boolean {
+  let cur = path.parentPath;
+  while (cur) {
+    if (cur.isJSXExpressionContainer()) return false;
+    if (cur.isJSXElement()) return true;
+    cur = cur.parentPath;
+  }
+  return false;
 }
 
 export function transformJSX(
@@ -531,13 +642,17 @@ export function transformJSX(
   traverse(ast, {
     JSXElement(path: any) {
       if (!hoist) return;
-      if (path.findParent((p: any) => p.isJSXElement())) return;
+      // Skip structural children of a parent JSX tree (parent HTML absorbs them).
+      // Allow hoist when a JSXExpressionContainer sits between this element and
+      // any JSX ancestor — e.g. <For>{(row) => <tr/>}</For>, {cond && <span/>}.
+      if (isStructuralJsxChild(path)) return;
 
       const opening = path.node.openingElement;
-      const tagName = opening.name;
-      if (tagName.type !== "JSXIdentifier") return;
-      const name = tagName.name;
-      if (!name || name[0] !== name[0].toLowerCase()) return;
+      if (!t.isJSXOpeningElement(opening)) return;
+      if (!t.isJSXIdentifier(opening.name)) return;
+      const name = opening.name.name;
+      const first = name[0];
+      if (!first || first !== first.toLowerCase()) return;
       if (elementNeedsJsxEnhancer(path.node)) return;
 
       try {
@@ -601,22 +716,13 @@ export function transformJSX(
             t.identifier("_$bindClass"),
           ),
         ],
-        t.stringLiteral("sinwan/renderer"),
+        t.stringLiteral("sinwan/renderer/web"),
       );
-      bindingImport.specifiers = bindingImport.specifiers.filter(
+      bindingImport.specifiers = (bindingImport.specifiers ?? []).filter(
         (candidate) =>
-          !ast.program.body.some(
-            (statement) =>
-              t.isImportDeclaration(statement) &&
-              statement.source.value === "sinwan/renderer" &&
-              statement.specifiers.some(
-                (specifier) =>
-                  t.isImportSpecifier(specifier) &&
-                  t.isIdentifier(specifier.imported) &&
-                  specifier.local.name === candidate.local.name &&
-                  specifier.imported.name === candidate.local.name,
-              ),
-          ),
+          t.isImportSpecifier(candidate) &&
+          t.isIdentifier(candidate.local) &&
+          !rendererHelperImported(ast.program.body, candidate.local.name),
       );
       if (bindingImport.specifiers.length > 0)
         ast.program.body.unshift(bindingImport);
@@ -689,13 +795,19 @@ export function transformJSX(
       ),
     );
   }
-
-  const importDecl = t.importDeclaration(
-    importSpecifiers,
-    t.stringLiteral("sinwan/renderer"),
-  );
-
-  ast.program.body.unshift(importDecl, ...templateDecls);
+  const freshSpecifiers = importSpecifiers.filter((specifier) => {
+    const local = specifier.local;
+    return t.isIdentifier(local) && !rendererHelperImported(ast.program.body, local.name);
+  });
+  ast.program.body.unshift(...templateDecls);
+  if (freshSpecifiers.length > 0) {
+    ast.program.body.unshift(
+      t.importDeclaration(
+        freshSpecifiers,
+        t.stringLiteral("sinwan/renderer/web"),
+      ),
+    );
+  }
 
   const result = generate(ast, { sourceMaps: true, sourceFileName: filename });
   return { code: result.code, map: result.map };

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { parse } from "@babel/parser";
-import _generate from "@babel/generator";
-import * as t from "@babel/types";
+import { parse } from "../src/ast/parse";
+import { generate } from "../src/ast/generate";
+import * as t from "../src/ast/types";
 import {
   collectComponentCallGraph,
   collectComponentFunctions,
@@ -15,11 +15,6 @@ import {
   wrapReactiveExpressions,
   type ReactiveScope,
 } from "../src/reactive-wrap";
-
-const generate =
-  typeof _generate === "function"
-    ? _generate
-    : ((_generate as { default?: typeof _generate }).default ?? _generate);
 
 function parseModule(code: string) {
   return parse(code, { sourceType: "module", plugins: ["jsx", "typescript"] });
@@ -75,6 +70,16 @@ describe("isReactiveValue", () => {
     ).toBe(false);
     expect(isReactiveValue(t.identifier("p"), scope)).toBe(true);
     expect(isReactiveValue(t.identifier("m"), scope)).toBe(true);
+    const grouped = {
+      type: "ParenthesizedExpression",
+      expression: t.identifier("p"),
+    };
+    expect(isReactiveValue(grouped, scope)).toBe(true);
+    const chain = {
+      type: "ChainExpression",
+      expression: t.memberExpression(t.identifier("s"), t.identifier("value")),
+    };
+    expect(isReactiveValue(chain, scope)).toBe(true);
   });
 
   it("treats untracked .value chains as signal reads", () => {
@@ -114,6 +119,16 @@ describe("containsReactiveValue", () => {
       t.memberExpression(t.identifier("s"), t.identifier("value")),
     );
     expect(containsReactiveValue(nested, scope)).toBe(false);
+    const grouped = {
+      type: "ParenthesizedExpression",
+      expression: t.memberExpression(t.identifier("s"), t.identifier("value")),
+    };
+    expect(containsReactiveValue(grouped, scope)).toBe(true);
+    const chain = {
+      type: "ChainExpression",
+      expression: t.memberExpression(t.identifier("s"), t.identifier("value")),
+    };
+    expect(containsReactiveValue(chain, scope)).toBe(true);
   });
 });
 

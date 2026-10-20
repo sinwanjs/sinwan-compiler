@@ -78,7 +78,7 @@ Tracked imports:
 
 | Module              | Names                          |
 | ------------------- | ------------------------------ |
-| `sinwan/store`      | `createMutable`, `createStore` |
+| `sinway`      | `createMutable`, `createStore` |
 | `sinwan/reactivity` | `signal`, `computed`           |
 | `sinwan/react`      | `useState`                     |
 | `sinwan/hook`       | `useFetch`                     |

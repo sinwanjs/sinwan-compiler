@@ -27,13 +27,9 @@
  * prepended so the subsequent reactive-wrap pass detects the components.
  */
 
-import * as t from "@babel/types";
-import _traverse from "@babel/traverse";
+import * as t from "./ast/types";
+import { traverse, singlePath } from "./ast/traverse";
 
-const traverse =
-  typeof _traverse === "function"
-    ? _traverse
-    : ((_traverse as any).default ?? _traverse);
 
 const CC_SOURCE_MODULES = new Set(["sinwan", "sinwan/component"]);
 
@@ -122,7 +118,7 @@ function isComponentArity(fn: t.Function): boolean {
   if (t.isFunctionDeclaration(fn) && fn.generator) return false;
   if (
     (t.isFunctionExpression(fn) || t.isArrowFunctionExpression(fn)) &&
-    (fn as any).generator
+    fn.generator
   ) {
     return false;
   }
@@ -140,21 +136,28 @@ function collectCcAliases(ast: t.Node): {
 } {
   const aliases = new Set<string>();
   traverse(ast, {
-    ImportDeclaration(path: any) {
-      const source = path.node.source.value as string;
+    ImportDeclaration(path) {
+      const source = t.moduleSourceValue(path.node.source);
+      if (!source) return;
       if (!CC_SOURCE_MODULES.has(source)) return;
-      for (const spec of path.node.specifiers) {
+      for (const spec of path.node.specifiers ?? []) {
         if (!t.isImportSpecifier(spec)) continue;
-        const imported = t.isIdentifier(spec.imported)
-          ? spec.imported.name
-          : spec.imported.value;
+        const imported = t.importedBindingName(spec.imported);
         if (imported === "cc") {
-          aliases.add(spec.local.name as string);
+          aliases.add(spec.local.name);
         }
       }
     },
   });
   return { aliases, alreadyImported: aliases.size > 0 };
+}
+
+function unwrapFunctionPath(fnPath: any): any {
+  let current = fnPath;
+  while (current && t.isParenthesizedExpression(current.node)) {
+    current = singlePath(current.get("expression"));
+  }
+  return current;
 }
 
 function ccCall(arg: t.Expression, ccName: string): t.CallExpression {
@@ -184,7 +187,7 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
       if (!decl) return;
 
       // export function Foo() {...}  ->  export const Foo = cc(function Foo() {...});
-      if (t.isFunctionDeclaration(decl) && decl.id) {
+      if (t.isFunctionDeclaration(decl) && t.isIdentifier(decl.id)) {
         const name = decl.id.name;
         const fnPath = path.get("declaration");
         if (!wrapIfCandidate(fnPath, name)) return;
@@ -211,20 +214,21 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
         for (const dPath of path.get("declaration.declarations") as any[]) {
           const id = dPath.node.id as t.LVal;
           if (!t.isIdentifier(id) || !isComponentName(id.name)) continue;
-          const init = dPath.node.init as t.Expression | undefined | null;
+          const init = dPath.node.init
+            ? (t.unwrapParens(dPath.node.init as t.Node) as t.Expression)
+            : dPath.node.init;
           if (!init) continue;
-          // Already wrapped in cc(...) (or an alias) — skip to stay idempotent.
+          let initPath = unwrapFunctionPath(dPath.get("init"));
           if (
-            t.isCallExpression(init) &&
-            t.isIdentifier(init.callee) &&
-            aliases.has(init.callee.name)
+            t.isCallExpression(initPath.node) &&
+            t.isIdentifier(initPath.node.callee) &&
+            aliases.has(initPath.node.callee.name)
           ) {
             continue;
           }
-          if (!t.isFunction(init)) continue;
-          const initPath = dPath.get("init");
+          if (!t.isFunction(initPath.node)) continue;
           if (!wrapIfCandidate(initPath, id.name)) continue;
-          dPath.node.init = ccCall(init, ccName ?? "cc");
+          dPath.node.init = ccCall(initPath.node, ccName ?? "cc");
           changed = true;
         }
         return;
@@ -232,11 +236,13 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
     },
 
     ExportDefaultDeclaration(path: any) {
-      const decl = path.node.declaration;
+      const decl = t.isNode(path.node.declaration)
+        ? t.unwrapParens(path.node.declaration)
+        : path.node.declaration;
 
       // export default function Foo() {...}
       //   -> function Foo() {...}; export default cc(Foo);  (preserves binding)
-      if (t.isFunctionDeclaration(decl) && decl.id) {
+      if (t.isFunctionDeclaration(decl) && t.isIdentifier(decl.id)) {
         const name = decl.id.name;
         const fnPath = path.get("declaration");
         if (!wrapIfCandidate(fnPath, name)) return;
@@ -273,9 +279,10 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
 
       // export default () => <div/>  /  export default function() {...} (expression form)
       if (t.isArrowFunctionExpression(decl) || t.isFunctionExpression(decl)) {
-        const declPath = path.get("declaration");
+        const declPath = unwrapFunctionPath(path.get("declaration"));
+        if (!t.isFunction(declPath.node)) return;
         if (!wrapIfCandidate(declPath, null)) return;
-        path.node.declaration = ccCall(decl, ccName ?? "cc");
+        path.node.declaration = ccCall(declPath.node, ccName ?? "cc");
         changed = true;
         return;
       }

@@ -6,7 +6,7 @@
  * when the value changes.
  *
  * Supported reactive sources:
- *   - `createMutable` / `createStore` from `sinwan/store`
+ *   - `createMutable` / `createStore` from `sinway`
  *   - `signal` / `computed` from `sinwan/reactivity`
  *   - `useState` from `sinwan/react`
  *   - `.value` reads of signals returned from other modules (`useTheme`,
@@ -21,20 +21,17 @@
  *   <p>{getCount()}</p>         → <p>{() => getCount()}</p>
  */
 
-import * as t from "@babel/types";
-import _traverse, {
-  type Binding as BabelBinding,
+import * as t from "./ast/types";
+import {
+  traverse,
+  singlePath,
+  type Binding as AstBinding,
   type NodePath,
   type TraverseOptions,
-} from "@babel/traverse";
+} from "./ast/traverse";
 import * as path from "path";
-import { parse } from "@babel/parser";
+import { parse } from "./ast/parse";
 import * as fs from "fs";
-
-const traverse =
-  typeof _traverse === "function"
-    ? _traverse
-    : ((_traverse as any).default ?? _traverse);
 
 import { loadMetadata } from "./analyze";
 
@@ -51,11 +48,29 @@ export interface ImportNames {
 }
 
 const REACTIVE_SOURCE_MODULES: Record<string, Set<string>> = {
-  "sinwan/store": new Set(["createMutable", "createStore"]),
+  sinway: new Set(["createMutable", "createStore"]),
   "sinwan/reactivity": new Set(["signal", "computed"]),
   "sinwan/react": new Set(["useState"]),
   "sinwan/hook": new Set(["useFetch"]),
 };
+
+function addImportLocal(
+  names: ImportNames,
+  imported: string,
+  local: string,
+): void {
+  switch (imported) {
+    case "createMutable":
+    case "createStore":
+    case "signal":
+    case "computed":
+    case "useState":
+    case "useFetch":
+    case "cc":
+      names[imported].add(local);
+      break;
+  }
+}
 
 const COMPONENT_FACTORY_MODULES: Record<string, Set<string>> = {
   sinwan: new Set(["cc"]),
@@ -103,7 +118,7 @@ function isReactiveContainerPassThrough(
   expr: t.Expression,
   scope: ReactiveScope,
 ): boolean {
-  let node: t.Node = expr;
+  let node: t.Node = t.unwrapParens(expr);
   while (t.isTSNonNullExpression(node)) {
     node = node.expression;
   }
@@ -126,21 +141,19 @@ export function trackReactiveImports(ast: t.Node): ImportNames {
 
   traverse(ast, {
     ImportDeclaration(path: any) {
-      const source = path.node.source.value as string;
+      const source = t.moduleSourceValue(path.node.source);
+      if (!source) return;
       const reactiveAllowed = REACTIVE_SOURCE_MODULES[source];
       const componentAllowed = COMPONENT_FACTORY_MODULES[source];
       if (!reactiveAllowed && !componentAllowed) return;
 
-      for (const spec of path.node.specifiers) {
+      for (const spec of path.node.specifiers ?? []) {
         if (!t.isImportSpecifier(spec)) continue;
-        const imported = t.isIdentifier(spec.imported)
-          ? spec.imported.name
-          : spec.imported.value;
-        if (reactiveAllowed?.has(imported)) {
-          const local = spec.local.name as string;
-          (names as any)[imported].add(local);
-        } else if (componentAllowed?.has(imported)) {
-          names.cc.add(spec.local.name as string);
+        const imported = t.importedBindingName(spec.imported);
+        if (imported && reactiveAllowed?.has(imported)) {
+          addImportLocal(names, imported, spec.local.name);
+        } else if (imported && componentAllowed?.has(imported)) {
+          names.cc.add(spec.local.name);
         }
       }
     },
@@ -386,9 +399,9 @@ function scanPureExports(
       //   /** @sinwan-pure */ export class Utils { ... }    → "class"
       if (hasPureJSDoc(p.node)) {
         const decl = p.node.declaration;
-        if (t.isFunctionDeclaration(decl) && decl.id) {
+        if (t.isFunctionDeclaration(decl) && t.isIdentifier(decl.id)) {
           pure.set(decl.id.name, "function");
-        } else if (t.isClassDeclaration(decl) && decl.id) {
+        } else if (t.isClassDeclaration(decl) && t.isIdentifier(decl.id)) {
           pure.set(decl.id.name, "class");
         } else if (t.isVariableDeclaration(decl)) {
           for (const d of decl.declarations) {
@@ -410,7 +423,7 @@ function scanPureExports(
       //   export { default } from "./utils";
       //   export { default as merge } from "./utils";
       // The compiler resolves the source and scans it recursively.
-      const source = p.node.source?.value as string | undefined;
+      const source = t.moduleSourceValue(p.node.source);
       if (source && p.node.specifiers) {
         const resolved = resolveAnyImport(source, filePath, resolveImport);
         if (resolved) {
@@ -419,7 +432,7 @@ function scanPureExports(
             reExportPure = scanPureExports(resolved, resolveImport, depth + 1);
             pureImportCache.set(resolved, reExportPure);
           }
-          for (const spec of p.node.specifiers) {
+          for (const spec of p.node.specifiers ?? []) {
             if (!t.isExportSpecifier(spec)) continue;
             const exported = t.isIdentifier(spec.exported)
               ? spec.exported.name
@@ -454,7 +467,7 @@ function scanPureExports(
       // export * from "./utils"
       // Re-exports ALL named exports from the source module.
       // Resolve the source and add all its pure exports to this file.
-      const source = p.node.source?.value as string | undefined;
+      const source = t.moduleSourceValue(p.node.source);
       if (!source) return;
       const resolved = resolveAnyImport(source, filePath, resolveImport);
       if (!resolved) return;
@@ -488,8 +501,9 @@ function collectPureImports(
   if (!filename) return result;
   const absoluteFilename = path.resolve(filename);
   traverse(ast, {
-    ImportDeclaration(p: any) {
-      const source = p.node.source.value as string;
+    ImportDeclaration(p) {
+      const source = t.moduleSourceValue(p.node.source);
+      if (!source) return;
       // Skip type-only imports — they don't produce runtime calls.
       if (p.node.importKind === "type") return;
       const resolved = resolveAnyImport(
@@ -503,13 +517,12 @@ function collectPureImports(
         filePure = scanPureExports(resolved, resolveImport);
         pureImportCache.set(resolved, filePure);
       }
-      for (const spec of p.node.specifiers) {
+      for (const spec of p.node.specifiers ?? []) {
         if (t.isImportSpecifier(spec)) {
           // Named import: import { cn } from "./utils"
           // or aliased: import { cn as merge } from "./utils"
-          const imported = t.isIdentifier(spec.imported)
-            ? spec.imported.name
-            : spec.imported.value;
+          const imported = t.importedBindingName(spec.imported);
+          if (!imported) continue;
           const kind = filePure.get(imported);
           if (!kind) continue;
           if (kind === "function") {
@@ -675,7 +688,7 @@ function isUseFetchCall(expr: t.Expression, names: ImportNames): boolean {
 }
 
 function trackLocalScopeBindings(
-  path: NodePath<t.Function>,
+  path: NodePath,
   names: ImportNames,
   scope: ReactiveScope,
   shallow = false,
@@ -798,7 +811,7 @@ function trackLocalScopeBindings(
 
       if (t.isFunctionDeclaration(node)) {
         fn = node;
-        name = node.id?.name ?? null;
+        name = t.isIdentifier(node.id) ? node.id.name : null;
       } else if (t.isVariableDeclarator(node)) {
         const init = node.init;
         if (
@@ -905,11 +918,10 @@ function analyzeObjectLiteralSpread(
 
 // ─── Detect reactive reads inside an expression ────────────
 
-/** True for `a.b` and optional `a?.b` member expressions. */
-function isMemberLike(
-  node: any,
-): node is t.MemberExpression | t.OptionalMemberExpression {
-  return t.isMemberExpression(node) || t.isOptionalMemberExpression(node);
+/** True for `a.b`, optional `a?.b`, and ChainExpression wrapping them. */
+function isMemberLike(node: any): boolean {
+  if (t.isChainExpression(node)) return isMemberLike(t.unwrapChain(node));
+  return t.isMemberExpression(node);
 }
 
 function isFunctionLike(
@@ -918,10 +930,9 @@ function isFunctionLike(
   return t.isArrowFunctionExpression(node) || t.isFunctionExpression(node);
 }
 
-function isCallLike(
-  node: t.Node,
-): node is t.CallExpression | t.OptionalCallExpression {
-  return t.isCallExpression(node) || t.isOptionalCallExpression(node);
+function isCallLike(node: t.Node): boolean {
+  const inner = t.unwrapCall(node);
+  return t.isCallExpression(inner);
 }
 
 const COMPILER_BINDING_CALLEES = new Set([
@@ -937,9 +948,11 @@ const COMPILER_BINDING_CALLEES = new Set([
  * getter arguments would re-wrap the same JSX container forever.
  */
 function isCompilerBindingCall(
-  node: t.CallExpression | t.OptionalCallExpression,
+  node: t.CallExpression | t.OptionalCallExpression | t.Node,
 ): boolean {
-  const callee = node.callee;
+  const call = t.unwrapCall(node);
+  if (!t.isCallExpression(call)) return false;
+  const callee = t.unwrapParens((call as { callee: t.Node }).callee);
   return t.isIdentifier(callee) && COMPILER_BINDING_CALLEES.has(callee.name);
 }
 
@@ -949,14 +962,17 @@ function isCompilerBindingCall(
  * returned handlers do not.
  */
 function visitCallCalleeAndArgs(
-  node: t.CallExpression | t.OptionalCallExpression,
+  node: t.CallExpression | t.OptionalCallExpression | t.Node,
   visitExpr: (expr: t.Node, enterFunction: boolean) => void,
 ): void {
-  if (isCompilerBindingCall(node)) return;
-  visitExpr(node.callee, true);
-  for (const arg of node.arguments) {
+  const call = t.unwrapCall(node);
+  if (!t.isCallExpression(call)) return;
+  if (isCompilerBindingCall(call)) return;
+  const callee = t.unwrapParens((call as { callee: t.Node }).callee);
+  visitExpr(callee, true);
+  for (const arg of (call as { arguments: t.Node[] }).arguments) {
     if (t.isSpreadElement(arg)) {
-      visitExpr(arg.argument, true);
+      visitExpr(arg.argument as t.Node, true);
       continue;
     }
     visitExpr(arg, true);
@@ -988,17 +1004,25 @@ function getMemberExpressionRootAndPath(
 ): { root: string; path: string[] } | null {
   const path: string[] = [];
   let current: t.Node = node;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
+    current = t.unwrapParens(current);
     if (t.isTSNonNullExpression(current)) {
-      current = current.expression;
+      current = current.expression as t.Node;
+      continue;
+    }
+    if (t.isChainExpression(current)) {
+      current = t.unwrapChain(current);
       continue;
     }
     if (isMemberLike(current)) {
-      if (current.computed) return null;
-      if (!t.isIdentifier(current.property)) return null;
-      path.push(current.property.name);
-      current = current.object;
+      const member = t.isChainExpression(current)
+        ? t.unwrapChain(current)
+        : current;
+      if ((member as { computed?: boolean }).computed) return null;
+      const property = (member as { property: t.Node }).property;
+      if (!t.isIdentifier(property)) return null;
+      path.push(property.name);
+      current = (member as { object: t.Node }).object;
       continue;
     }
     break;
@@ -1011,7 +1035,10 @@ function getMemberExpressionRootAndPath(
 
 function isReactiveRead(node: t.Node, scope: ReactiveScope): boolean {
   if (t.isTSNonNullExpression(node)) {
-    return isReactiveRead(node.expression, scope);
+    return isReactiveRead(node.expression as t.Node, scope);
+  }
+  if (t.isChainExpression(node)) {
+    return isReactiveRead(t.unwrapChain(node), scope);
   }
 
   if (t.isIdentifier(node)) {
@@ -1058,22 +1085,24 @@ function isReactiveRead(node: t.Node, scope: ReactiveScope): boolean {
 }
 
 function isGetterCall(
-  node: t.CallExpression | t.OptionalCallExpression,
+  node: t.CallExpression | t.OptionalCallExpression | t.Node,
   scope: ReactiveScope,
 ): boolean {
-  const callee = node.callee;
+  const call = t.unwrapCall(node);
+  if (!t.isCallExpression(call)) return false;
+  const callee = t.unwrapParens((call as { callee: t.Node }).callee);
   if (t.isIdentifier(callee)) {
     const binding = scope.bindings.get(callee.name);
     if (binding?.kind === "getter") return true;
     if (binding) return false;
-    return node.arguments.length === 0;
+    return (call as { arguments: unknown[] }).arguments.length === 0;
   }
   if (
     isMemberLike(callee) &&
     !callee.computed &&
     t.isIdentifier(callee.property)
   ) {
-    if (node.arguments.length !== 0) return false;
+    if ((call as { arguments: unknown[] }).arguments.length !== 0) return false;
     const rootPath = getMemberExpressionRootAndPath(callee);
     if (!rootPath) return false;
     const binding = scope.bindings.get(rootPath.root);
@@ -1094,8 +1123,14 @@ function isGetterCall(
 }
 
 export function isReactiveValue(node: t.Node, scope: ReactiveScope): boolean {
+  if (t.isParenthesizedExpression(node)) {
+    return isReactiveValue(t.unwrapParens(node), scope);
+  }
   if (t.isTSNonNullExpression(node)) {
     return isReactiveValue(node.expression, scope);
+  }
+  if (t.isChainExpression(node)) {
+    return isReactiveValue(t.unwrapChain(node), scope);
   }
 
   if (t.isIdentifier(node)) {
@@ -1138,6 +1173,16 @@ export function containsReactiveValue(
   function visit(node: any): void {
     if (found) return;
     if (!node || typeof node !== "object") return;
+
+    if (node.type === "ParenthesizedExpression") {
+      visit(node.expression);
+      return;
+    }
+
+    if (t.isChainExpression(node)) {
+      visit(t.unwrapChain(node));
+      return;
+    }
 
     if (
       isMemberLike(node) ||
@@ -1193,6 +1238,16 @@ function containsReactiveRead(
   function visit(node: any, enterFunction: boolean): void {
     if (found) return;
     if (!node || typeof node !== "object") return;
+
+    if (node.type === "ParenthesizedExpression") {
+      visit(node.expression, enterFunction);
+      return;
+    }
+
+    if (t.isChainExpression(node)) {
+      visit(t.unwrapChain(node), enterFunction);
+      return;
+    }
 
     if (isFunctionLike(node)) {
       if (!enterFunction) return;
@@ -1307,7 +1362,7 @@ export function getComponentExpressionInfo(exprPath: {
     componentName = name.name;
     firstChar = name.name?.[0] ?? null;
   } else if (t.isJSXMemberExpression(name)) {
-    let current: t.JSXMemberExpression | t.JSXIdentifier = name;
+    let current: t.Node = name;
     while (t.isJSXMemberExpression(current)) {
       current = current.object;
     }
@@ -1355,12 +1410,13 @@ function isReactiveComponentProp(
 }
 
 function shouldWrap(expr: t.Expression, scope: ReactiveScope): boolean {
+  const inner = t.unwrapParens(expr);
   // Already a function — leave event handlers and manual getters alone
-  if (t.isArrowFunctionExpression(expr) || t.isFunctionExpression(expr))
+  if (t.isArrowFunctionExpression(inner) || t.isFunctionExpression(inner))
     return false;
   // Empty JSX expression
-  if (t.isJSXEmptyExpression(expr)) return false;
-  return containsReactiveRead(expr, scope);
+  if (t.isJSXEmptyExpression(inner)) return false;
+  return containsReactiveRead(inner, scope);
 }
 
 /**
@@ -1414,11 +1470,19 @@ function transformPropMemberAccess(
     let parent: any = null;
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      if (t.isParenthesizedExpression(current)) {
+        current = t.unwrapParens(current);
+        continue;
+      }
+      if (t.isChainExpression(current)) {
+        current = t.unwrapChain(current);
+        continue;
+      }
       if (t.isTSNonNullExpression(current)) {
         current = current.expression;
         continue;
       }
-      if (!isMemberLike(current)) break;
+      if (!t.isMemberExpression(current)) break;
       parent = current;
       current = current.object;
     }
@@ -1429,6 +1493,11 @@ function transformPropMemberAccess(
 
   function visit(node: any, enterFunction: boolean): void {
     if (!node || typeof node !== "object") return;
+
+    if (node.type === "ParenthesizedExpression") {
+      visit(node.expression, enterFunction);
+      return;
+    }
 
     if (isFunctionLike(node)) {
       if (!enterFunction) return;
@@ -1514,10 +1583,12 @@ function isPropRoot(expr: t.Expression, scope: ReactiveScope): boolean {
 }
 
 function isChildrenPropRead(expr: t.Expression, scope: ReactiveScope): boolean {
-  if (t.isIdentifier(expr, { name: "children" })) return true;
-  if (!isMemberLike(expr) || expr.computed) return false;
-  if (!t.isIdentifier(expr.property, { name: "children" })) return false;
-  return isPropRoot(expr.object as t.Expression, scope);
+  let node: t.Node = t.unwrapParens(expr);
+  if (t.isChainExpression(node)) node = t.unwrapParens(t.unwrapChain(node));
+  if (t.isIdentifier(node, { name: "children" })) return true;
+  if (!t.isMemberExpression(node) || node.computed) return false;
+  if (!t.isIdentifier(node.property, { name: "children" })) return false;
+  return isPropRoot(node.object as t.Expression, scope);
 }
 
 function createBindingDescriptor(
@@ -1825,7 +1896,7 @@ interface DerivedLocalOptions {
 
 interface DerivedLocal {
   declaration: NodePath<t.VariableDeclarator>;
-  binding: BabelBinding;
+  binding: AstBinding;
 }
 
 function hasSnapshotPragma(node: t.Node): boolean {
@@ -1836,14 +1907,13 @@ function hasSnapshotPragma(node: t.Node): boolean {
   );
 }
 
+function isTypePosition(ref: NodePath): boolean {
+  return ref.findParent((parent) => parent.isTSType()) != null;
+}
+
 function canRewriteDerivedReference(ref: NodePath): boolean {
-  if (
-    !ref.isIdentifier() ||
-    !ref.isReferencedIdentifier() ||
-    ref.findParent((p) => p.isTSType())
-  ) {
-    return false;
-  }
+  if (!ref.isIdentifier() || !ref.isReferencedIdentifier()) return false;
+  if (isTypePosition(ref)) return true;
   let target: NodePath = ref;
   while (
     ((target.parentPath?.isMemberExpression() ||
@@ -1851,7 +1921,9 @@ function canRewriteDerivedReference(ref: NodePath): boolean {
       target.key === "object") ||
     ((target.parentPath?.isTSNonNullExpression() ||
       target.parentPath?.isTSAsExpression() ||
-      target.parentPath?.isTSTypeAssertion()) &&
+      target.parentPath?.isTSTypeAssertion() ||
+      target.parentPath?.isTSSatisfiesExpression() ||
+      target.parentPath?.isParenthesizedExpression()) &&
       target.key === "expression")
   ) {
     target = target.parentPath;
@@ -1876,7 +1948,9 @@ function isPureDerivedCall(
 ): boolean {
   if (!path.isCallExpression() && !path.isOptionalCallExpression())
     return false;
-  const callee = path.node.callee;
+  const call = t.unwrapCall(path.node);
+  const callee = t.unwrapParens((call as { callee: t.Node }).callee);
+  const args = (call as { arguments?: unknown[] }).arguments ?? [];
 
   // Member expression calls: Utils.merge(...), ns.cn(...), ns.Utils.merge(...)
   if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
@@ -1884,19 +1958,25 @@ function isPureDerivedCall(
     // e.g. ns.Utils.merge → root="ns", props=["Utils", "merge"]
     // e.g. ns.cn → root="ns", props=["cn"]
     // e.g. helpers.merge → root="helpers", props=["merge"]
-    const props: string[] = [];
-    let node: t.Node = callee;
-    while (t.isMemberExpression(node) || t.isOptionalMemberExpression(node)) {
-      const prop = node.property;
-      if (t.isIdentifier(prop)) {
-        props.unshift(prop.name);
-      } else if (t.isStringLiteral(prop)) {
-        props.unshift(prop.value);
-      } else {
-        return false; // computed member access — can't statically resolve
-      }
-      node = node.object;
+  const props: string[] = [];
+  let node: t.Node = t.unwrapParens(callee);
+  while (true) {
+    node = t.unwrapParens(node);
+    if (t.isChainExpression(node)) {
+      node = t.unwrapChain(node);
+      continue;
     }
+    if (!t.isMemberExpression(node)) break;
+    const prop = node.property;
+    if (t.isIdentifier(prop)) {
+      props.unshift(prop.name);
+    } else if (t.isStringLiteral(prop)) {
+      props.unshift(prop.value);
+    } else {
+      return false;
+    }
+    node = node.object as t.Node;
+  }
     if (!t.isIdentifier(node)) return false;
     const root = node.name;
 
@@ -1920,7 +2000,7 @@ function isPureDerivedCall(
   if (!binding) {
     return (
       ["Boolean", "Number", "String"].includes(callee.name) &&
-      path.node.arguments.length === 1
+      args.length === 1
     );
   }
   // @sinwan-pure JSDoc-annotated imported functions (named or default) are
@@ -1932,7 +2012,7 @@ function isPureDerivedCall(
   ) {
     return true;
   }
-  if (path.node.arguments.length !== 0 || !binding.path.isVariableDeclarator())
+  if (args.length !== 0 || !binding.path.isVariableDeclarator())
     return false;
   const { id, init } = binding.path.node;
   return (
@@ -1951,11 +2031,10 @@ function isDerivedInitializer(
   declaration: NodePath<t.VariableDeclarator>,
   scope: ReactiveScope,
   names: ImportNames,
-  derived: Map<BabelBinding, DerivedLocal>,
+  derived: Map<AstBinding, DerivedLocal>,
   pureImports: PureImports,
 ): boolean {
-  const init: NodePath<t.Expression | null | undefined> =
-    declaration.get("init");
+  const init = singlePath(declaration.get("init"));
   init.assertExpression();
   let safe = true;
   let reactive = false;
@@ -2002,6 +2081,8 @@ function isDerivedInitializer(
         path.isObjectExpression() ||
         path.isObjectProperty() ||
         path.isArrayExpression() ||
+        path.isParenthesizedExpression() ||
+        path.node.type === "ChainExpression" ||
         (path.isUnaryExpression() && path.node.operator !== "delete") ||
         path.isTSAsExpression() ||
         path.isTSSatisfiesExpression() ||
@@ -2032,21 +2113,22 @@ function promoteReactiveConstInitializers(
   // Re-crawl the program scope so bindings injected by autoWrapComponents
   // (e.g. the `cc` import) are visible to the module-kind guard below.
   traverse(ast, {
-    Program(p: NodePath<t.Program>) {
+    Program(p) {
       p.scope.crawl();
     },
   });
   traverse(ast, {
-    Function(fnPath: NodePath<t.Function>) {
-      if (!functions.has(fnPath.node)) return;
+    Function(fnPath) {
+      if (!t.isFunction(fnPath.node) || !functions.has(fnPath.node)) return;
       const factory = fnPath.parentPath;
       if (
+        !factory ||
         !factory.isCallExpression() ||
         !t.isIdentifier(factory.node.callee) ||
         factory.scope.getBinding(factory.node.callee.name)?.kind !== "module"
       )
         return;
-      const body = fnPath.get("body");
+      const body = singlePath(fnPath.get("body"));
       if (!body.isBlockStatement()) return;
       let hasDirectEval = false;
       fnPath.traverse({
@@ -2066,14 +2148,20 @@ function promoteReactiveConstInitializers(
         getAllPropNames(fnPath.node.params[0]),
       );
       trackLocalScopeBindings(fnPath, names, scope, true);
-      const derived = new Map<BabelBinding, DerivedLocal>();
-      for (const statement of body.get("body")) {
+      const derived = new Map<AstBinding, DerivedLocal>();
+      const statements = body.get("body");
+      for (const statement of Array.isArray(statements)
+        ? statements
+        : [statements]) {
         if (
           !statement.isVariableDeclaration({ kind: "const" }) ||
           hasSnapshotPragma(statement.node)
         )
           continue;
-        for (const declaration of statement.get("declarations")) {
+        for (const declaration of (() => {
+          const decls = statement.get("declarations");
+          return Array.isArray(decls) ? decls : [decls];
+        })()) {
           const { id, init } = declaration.node;
           if (
             !t.isIdentifier(id) ||
@@ -2125,6 +2213,7 @@ function promoteReactiveConstInitializers(
         }
         declaration.node.init = getter;
         for (const ref of binding.referencePaths) {
+          if (isTypePosition(ref)) continue;
           if (
             options.dev &&
             ref.parentPath?.isIfStatement() &&
@@ -2208,22 +2297,19 @@ export function wrapReactiveExpressions(
   let hasUnwrapImport = false;
 
   traverse(ast, {
-    ImportDeclaration(p: any) {
-      const source = p.node.source.value as string;
-
-      // Reactive source imports + component factory imports
+    ImportDeclaration(p) {
+      const source = t.moduleSourceValue(p.node.source);
+      if (!source) return;
       const reactiveAllowed = REACTIVE_SOURCE_MODULES[source];
       const componentAllowed = COMPONENT_FACTORY_MODULES[source];
       if (reactiveAllowed || componentAllowed) {
-        for (const spec of p.node.specifiers) {
+        for (const spec of p.node.specifiers ?? []) {
           if (!t.isImportSpecifier(spec)) continue;
-          const imported = t.isIdentifier(spec.imported)
-            ? spec.imported.name
-            : spec.imported.value;
-          if (reactiveAllowed?.has(imported)) {
-            (names as any)[imported].add(spec.local.name as string);
-          } else if (componentAllowed?.has(imported)) {
-            names.cc.add(spec.local.name as string);
+          const imported = t.importedBindingName(spec.imported);
+          if (imported && reactiveAllowed?.has(imported)) {
+            addImportLocal(names, imported, spec.local.name);
+          } else if (imported && componentAllowed?.has(imported)) {
+            names.cc.add(spec.local.name);
           }
         }
       }
@@ -2232,7 +2318,7 @@ export function wrapReactiveExpressions(
       // `import { unwrap }` is a different binding; generated code always
       // calls `_$unwrap`, so only skip inject when that alias already exists.
       if (source === "sinwan/reactivity") {
-        for (const spec of p.node.specifiers) {
+        for (const spec of p.node.specifiers ?? []) {
           if (
             t.isImportSpecifier(spec) &&
             t.isIdentifier(spec.imported) &&
@@ -2255,11 +2341,9 @@ export function wrapReactiveExpressions(
         if (resolved) {
           const fileProps = metadata.get(resolved);
           if (fileProps) {
-            for (const spec of p.node.specifiers) {
+            for (const spec of p.node.specifiers ?? []) {
               if (!t.isImportSpecifier(spec)) continue;
-              const imported = t.isIdentifier(spec.imported)
-                ? spec.imported.name
-                : spec.imported.value;
+              const imported = t.importedBindingName(spec.imported);
               if (!imported || !/^[A-Z]/.test(imported)) continue;
               const props = fileProps.get(imported);
               if (props && props.size > 0) {

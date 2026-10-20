@@ -7,16 +7,12 @@
  * per-file transform.
  */
 
-import { parse } from "@babel/parser";
-import * as t from "@babel/types";
-import _traverse from "@babel/traverse";
+import { parse } from "./ast/parse";
+import * as t from "./ast/types";
+import { traverse } from "./ast/traverse";
 import * as fs from "fs";
 import * as path from "path";
 
-const traverse =
-  typeof _traverse === "function"
-    ? _traverse
-    : ((_traverse as any).default ?? _traverse);
 
 import {
   collectComponentFunctions,
@@ -303,13 +299,13 @@ function collectImports(ast: t.Node): Map<string, ImportInfo> {
   const imports = new Map<string, ImportInfo>();
   traverse(ast, {
     ImportDeclaration(path: any) {
-      const source: string = path.node.source.value;
+      const source = t.moduleSourceValue(path.node.source);
+      if (!source) return;
       for (const spec of path.node.specifiers) {
         if (t.isImportSpecifier(spec)) {
           const localName = spec.local.name;
-          const importedName = t.isIdentifier(spec.imported)
-            ? spec.imported.name
-            : spec.imported.value;
+          const importedName = t.importedBindingName(spec.imported);
+          if (!importedName) continue;
           imports.set(localName, { source, importedName });
         } else if (t.isImportDefaultSpecifier(spec)) {
           imports.set(spec.local.name, { source, importedName: "default" });
@@ -425,7 +421,9 @@ export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
 
   traverse(ast, {
     ExportDefaultDeclaration(path: any) {
-      const decl = path.node.declaration;
+      const decl = t.isNode(path.node.declaration)
+        ? t.unwrapParens(path.node.declaration)
+        : path.node.declaration;
       if (t.isIdentifier(decl)) {
         const fn = componentNames.get(decl.name);
         if (fn) defaultExport = fn;
@@ -433,8 +431,10 @@ export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
         const callee = decl.callee;
         if (t.isIdentifier(callee) && names.cc.has(callee.name)) {
           const firstArg = decl.arguments[0];
-          if (firstArg && t.isFunction(firstArg)) {
-            defaultExport = firstArg;
+          const fnArg =
+            firstArg && t.isNode(firstArg) ? t.unwrapParens(firstArg) : firstArg;
+          if (fnArg && t.isFunction(fnArg)) {
+            defaultExport = fnArg;
           }
         }
       }

@@ -9,7 +9,7 @@ import {
   loadWorkspacePackages,
 } from "../src/analyze";
 import { getAllPropNames } from "../src/reactive-wrap";
-import * as t from "@babel/types";
+import * as t from "../src/ast/types";
 
 function resolve(files: Record<string, string>) {
   return (source: string, fromFile: string) => {

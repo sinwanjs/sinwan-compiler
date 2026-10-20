@@ -7,6 +7,28 @@ import {
 } from "../src/transform";
 import { analyzeProject } from "../src/analyze";
 
+/** Oxc/esrap formatting differs from Babel; compare on normalized text. */
+function expectFragment(code: string, fragment: string) {
+  const unwrapAssignParens = (s: string) =>
+    s.replace(/=\(([^;]+)\);/g, (_match, inner: string) => {
+      let value = inner;
+      while (value.startsWith("(") && value.endsWith(")")) {
+        value = value.slice(1, -1);
+      }
+      return `=(${value});`;
+    });
+  const norm = (s: string) =>
+    unwrapAssignParens(
+      s
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\s+/g, "")
+        .replace(/\((\w+)\)=>/g, "$1=>")
+        .replace(/=>\(([^(){}]+)\)/g, "=>$1")
+        .replace(/\((\w+(?:\??\.\w+)*!?)\)\./g, "$1."),
+    );
+  expect(norm(code)).toContain(norm(fragment));
+}
+
 describe("derived local promotion", () => {
   const compile = (body: string) =>
     transformJSX(
@@ -22,9 +44,9 @@ describe("derived local promotion", () => {
   it("promotes a reactive const and keeps Show lazy", () => {
     const code = compile(`const count = signal(0); const open = count.value > 0;
       return <Show when={open}><span>{open}</span></Show>;`);
-    expect(code).toContain("const open = () => count.value > 0;");
-    expect(code).toContain("when={() => open()}");
-    expect(code).toContain("{() => open()}");
+    expectFragment(code, "const open = () => count.value > 0;");
+    expectFragment(code, "when={() => open()}");
+    expectFragment(code, "{() => open()}");
   });
 
   it("rewrites late-panel dependency chains in declaration order", () => {
@@ -33,10 +55,10 @@ describe("derived local promotion", () => {
       const collapsed = left?.collapsed.value;
       const open = collapsed && right?.collapsed.value === false;
       return <Show when={open} />;`);
-    expect(code).toContain("left = () => panels.value[0]");
-    expect(code).toContain("right = () => panels.value[1]");
-    expect(code).toContain("const collapsed = () => left()?.collapsed.value;");
-    expect(code).toContain(
+    expectFragment(code, "left = () => panels.value[0]");
+    expectFragment(code, "right = () => panels.value[1]");
+    expectFragment(code, "const collapsed = () => left()?.collapsed.value;");
+    expectFragment(code, 
       "const open = () => collapsed() && right()?.collapsed.value === false;",
     );
   });
@@ -48,13 +70,13 @@ describe("derived local promotion", () => {
       const handle = () => consume(open);
       function shadow(open) { return { open }; }
       return <button onClick={handle} onInput={() => consume(open)}>{open ? "yes" : "no"}</button>;`);
-    expect(code).toContain("const open = (): boolean => count.value > 0;");
-    expect(code).toContain("if (open())");
-    expect(code).toContain("open: open()");
-    expect(code).toContain("const handle = () => consume(open());");
-    expect(code).toContain("onClick={handle}");
-    expect(code).toContain("onInput={() => consume(open())}");
-    expect(code).toContain("return {\n      open\n    };");
+    expectFragment(code, "const open = (): boolean => count.value > 0;");
+    expectFragment(code, "if (open())");
+    expectFragment(code, "open: open()");
+    expectFragment(code, "const handle = () => consume(open());");
+    expectFragment(code, "onClick={handle}");
+    expectFragment(code, "onInput={() => consume(open())}");
+    expectFragment(code, "return {\n      open\n    };");
   });
 
   it("preserves static consts, containers, manual getters and mutable declarations", () => {
@@ -62,11 +84,11 @@ describe("derived local promotion", () => {
       const n = 1 + 2; const manual = () => count.value;
       let snapshot = count.value; snapshot++;
       return <Child user={user} n={n} manual={manual} snapshot={snapshot} />;`);
-    expect(code).toContain("const user = count;");
-    expect(code).toContain("const n = 1 + 2;");
-    expect(code).toContain("const manual = () => count.value;");
-    expect(code).toContain("let snapshot = count.value;");
-    expect(code).toContain("user={user}");
+    expectFragment(code, "const user = count;");
+    expectFragment(code, "const n = 1 + 2;");
+    expectFragment(code, "const manual = () => count.value;");
+    expectFragment(code, "let snapshot = count.value;");
+    expectFragment(code, "user={user}");
   });
 
   it("promotes reactive object and array literals with signal reads", () => {
@@ -74,11 +96,11 @@ describe("derived local promotion", () => {
       const style = { flexBasis: \`\${size.value}%\`, flexGrow: 0 };
       const list = [size.value, 70];
       return <div style={style} data-sizes={list} />;`);
-    expect(code).toContain("const style = () => ({");
-    expect(code).toContain("flexBasis: \`\${size.value}%\`");
-    expect(code).toContain("const list = () => [size.value, 70];");
-    expect(code).toContain("style={() => style()}");
-    expect(code).toContain("data-sizes={() => list()}");
+    expectFragment(code, "const style = () => ({");
+    expectFragment(code, "flexBasis: \`\${size.value}%\`");
+    expectFragment(code, "const list = () => [size.value, 70];");
+    expectFragment(code, "style={() => style()}");
+    expectFragment(code, "data-sizes={() => list()}");
   });
 
   it("promotes calls to @sinwan-pure JSDoc-annotated imported functions", () => {
@@ -108,10 +130,10 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const handleClass = () => cn(");
-      expect(result.code).toContain("class={() => handleClass()}");
-      expect(result.code).toContain("const merged = () => merge(");
-      expect(result.code).toContain("data-merge={() => merged()}");
+      expectFragment(result.code, "const handleClass = () => cn(");
+      expectFragment(result.code, "class={() => handleClass()}");
+      expectFragment(result.code, "const merged = () => merge(");
+      expectFragment(result.code, "data-merge={() => merged()}");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -145,7 +167,7 @@ export const App = cc(() => {
         { derivedLocals: true, hoist: false },
       );
       // impure is not @sinwan-pure annotated, so it should NOT be promoted
-      expect(result.code).toContain("const handleClass = impure(");
+      expectFragment(result.code, "const handleClass = impure(");
       expect(result.code).not.toContain("const handleClass = () => impure(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -190,7 +212,7 @@ export const App = cc(() => {
         { derivedLocals: true, hoist: false },
       );
       // cn from index.ts should be promoted
-      expect(result.code).toContain("const handleClass = () => cn(");
+      expectFragment(result.code, "const handleClass = () => cn(");
     } finally {
       fs.chmodSync(badPath, 0o644);
       fs.rmSync(tmpDir, { recursive: true });
@@ -238,8 +260,8 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const handleClass = () => clsxLite(");
-      expect(result.code).toContain("class={() => handleClass()}");
+      expectFragment(result.code, "const handleClass = () => clsxLite(");
+      expectFragment(result.code, "class={() => handleClass()}");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -291,7 +313,7 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const handleClass = () => merge(");
+      expectFragment(result.code, "const handleClass = () => merge(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -332,7 +354,7 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const handleClass = helper(");
+      expectFragment(result.code, "const handleClass = helper(");
       expect(result.code).not.toContain("const handleClass = () => helper(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -379,10 +401,10 @@ export const App = cc(() => {
         { derivedLocals: true, hoist: false },
       );
       // cn and merge are @sinwan-pure in utils.ts, re-exported via index.ts
-      expect(result.code).toContain("const a = () => cn(");
-      expect(result.code).toContain("const b = () => merge(");
+      expectFragment(result.code, "const a = () => cn(");
+      expectFragment(result.code, "const b = () => merge(");
       // impure is NOT annotated, so it should NOT be promoted
-      expect(result.code).toContain("const c = impure(");
+      expectFragment(result.code, "const c = impure(");
       expect(result.code).not.toContain("const c = () => impure(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -424,7 +446,7 @@ export const App = cc(() => {
         { derivedLocals: true, hoist: false },
       );
       // cn is aliased to className in the re-export, but still @sinwan-pure
-      expect(result.code).toContain("const cls = () => className(");
+      expectFragment(result.code, "const cls = () => className(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -468,8 +490,8 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => cn(");
-      expect(result.code).toContain("const b = () => other(");
+      expectFragment(result.code, "const a = () => cn(");
+      expectFragment(result.code, "const b = () => other(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -505,8 +527,8 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const cls = () => defaultHelper(");
-      expect(result.code).toContain("class={() => cls()}");
+      expectFragment(result.code, "const cls = () => defaultHelper(");
+      expectFragment(result.code, "class={() => cls()}");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -542,7 +564,7 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const cls = () => merge(");
+      expectFragment(result.code, "const cls = () => merge(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -582,7 +604,7 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const cls = () => defaultHelper(");
+      expectFragment(result.code, "const cls = () => defaultHelper(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -622,7 +644,7 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const cls = () => merge(");
+      expectFragment(result.code, "const cls = () => merge(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -660,10 +682,10 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => utils.cn(");
-      expect(result.code).toContain("const b = () => utils.merge(");
+      expectFragment(result.code, "const a = () => utils.cn(");
+      expectFragment(result.code, "const b = () => utils.merge(");
       // impure is NOT annotated — should not be promoted
-      expect(result.code).toContain("const c = utils.impure(");
+      expectFragment(result.code, "const c = utils.impure(");
       expect(result.code).not.toContain("const c = () => utils.impure(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -701,8 +723,8 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => PureUtils.merge(");
-      expect(result.code).toContain("const b = () => PureUtils.format(");
+      expectFragment(result.code, "const a = () => PureUtils.merge(");
+      expectFragment(result.code, "const b = () => PureUtils.format(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -739,8 +761,8 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => helpers.merge(");
-      expect(result.code).toContain("const b = () => helpers.format(");
+      expectFragment(result.code, "const a = () => helpers.merge(");
+      expectFragment(result.code, "const b = () => helpers.format(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -776,7 +798,7 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => PureUtils.merge(");
+      expectFragment(result.code, "const a = () => PureUtils.merge(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -813,7 +835,7 @@ export const App = cc(() => {
         { derivedLocals: true, hoist: false },
       );
       // ns.cn() should be promoted (function kind)
-      expect(result.code).toContain("const a = () => utils.cn(");
+      expectFragment(result.code, "const a = () => utils.cn(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -849,7 +871,7 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const cls = defaultHelper(");
+      expectFragment(result.code, "const cls = defaultHelper(");
       expect(result.code).not.toContain("const cls = () => defaultHelper(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -887,9 +909,9 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = Utils.merge(");
+      expectFragment(result.code, "const a = Utils.merge(");
       expect(result.code).not.toContain("const a = () => Utils.merge(");
-      expect(result.code).toContain("const b = helpers.merge(");
+      expectFragment(result.code, "const b = helpers.merge(");
       expect(result.code).not.toContain("const b = () => helpers.merge(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -930,9 +952,9 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => cn(");
-      expect(result.code).toContain("const b = () => merge(");
-      expect(result.code).toContain("const c = impure(");
+      expectFragment(result.code, "const a = () => cn(");
+      expectFragment(result.code, "const b = () => merge(");
+      expectFragment(result.code, "const c = impure(");
       expect(result.code).not.toContain("const c = () => impure(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -972,10 +994,10 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => ns.NSUtils.merge(");
-      expect(result.code).toContain("const b = () => ns.NSUtils.format(");
-      expect(result.code).toContain("const c = () => ns.cn(");
-      expect(result.code).toContain('const d = () => ns["cn"](');
+      expectFragment(result.code, "const a = () => ns.NSUtils.merge(");
+      expectFragment(result.code, "const b = () => ns.NSUtils.format(");
+      expectFragment(result.code, "const c = () => ns.cn(");
+      expectFragment(result.code, 'const d = () => ns["cn"](');
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -1014,10 +1036,10 @@ export const App = cc(() => {
         { derivedLocals: true, hoist: false },
       );
       // Computed member access with a variable key can't be statically resolved
-      expect(result.code).toContain("const a = ns[key](");
+      expectFragment(result.code, "const a = ns[key](");
       expect(result.code).not.toContain("const a = () => ns[key](");
       // Template literal key is also not statically resolved
-      expect(result.code).toContain("const b = ns[`cn`](");
+      expectFragment(result.code, "const b = ns[`cn`](");
       expect(result.code).not.toContain("const b = () => ns[`cn`](");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
@@ -1070,14 +1092,14 @@ export const App = cc(() => {
         { derivedLocals: true, hoist: false },
       );
       // Auto-promoted cases
-      expect(result.code).toContain("const a = () => cn(");
-      expect(result.code).toContain("const b = () => ns.cn(");
-      expect(result.code).toContain('const c = () => ns["cn"](');
-      expect(result.code).toContain("const d = () => helpers.merge(");
+      expectFragment(result.code, "const a = () => cn(");
+      expectFragment(result.code, "const b = () => ns.cn(");
+      expectFragment(result.code, 'const c = () => ns["cn"](');
+      expectFragment(result.code, "const d = () => helpers.merge(");
       // Manual getter — preserved as-is (not rewritten by compiler)
-      expect(result.code).toContain("const e = () =>");
+      expectFragment(result.code, "const e = () =>");
       // computed() — preserved as-is (already a getter)
-      expect(result.code).toContain("const f = computed(() => ns.cn(");
+      expectFragment(result.code, "const f = computed(() => ns.cn(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -1153,9 +1175,9 @@ export const App = cc(() => {
         componentPath,
         { derivedLocals: true, hoist: false },
       );
-      expect(result.code).toContain("const a = () => condMerge(");
-      expect(result.code).toContain("const b = () => rootMerge(");
-      expect(result.code).toContain("const c = () => subHelper(");
+      expectFragment(result.code, "const a = () => condMerge(");
+      expectFragment(result.code, "const b = () => rootMerge(");
+      expectFragment(result.code, "const c = () => subHelper(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -1203,7 +1225,7 @@ export const App = cc(() => {
           },
         },
       );
-      expect(result.code).toContain("const handleClass = () => cbHelper(");
+      expectFragment(result.code, "const handleClass = () => cbHelper(");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -1302,9 +1324,9 @@ export const App = cc(() => {
       // no-pkg-json: no package.json, so resolvePackageEntry returns null,
       // but tryResolveBare walks up and finds the dir. Without package.json,
       // resolvePackageEntry fails. So noPkgHelper should NOT be promoted.
-      expect(result.code).toContain("const a = noPkgHelper()");
+      expectFragment(result.code, "const a = noPkgHelper()");
       // bad-json: invalid package.json, same issue
-      expect(result.code).toContain("const b = badJsonHelper()");
+      expectFragment(result.code, "const b = badJsonHelper()");
       // wrong-main: main points to nonexistent, but exports field is absent,
       // so falls through to root index. No root index exists, so not promoted.
       // Actually, src/index.ts exists but we only check root index, not src/.
@@ -1312,12 +1334,12 @@ export const App = cc(() => {
       // But wait — we check "source", "module", "main", "types" fields.
       // main is "./nonexistent.js" which doesn't exist. No other fields.
       // Then root index — no index at root. So not promoted.
-      expect(result.code).toContain("const c = wrongMainHelper()");
+      expectFragment(result.code, "const c = wrongMainHelper()");
       // missing-sub/nonexistent: subpath doesn't exist anywhere
-      expect(result.code).toContain("const d = missing()");
+      expectFragment(result.code, "const d = missing()");
       // cond-missing: conditional exports point to non-existent files,
       // but root index.ts exists, so it falls through to root index
-      expect(result.code).toContain("const e = () => condMissingHelper()");
+      expectFragment(result.code, "const e = () => condMissingHelper()");
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -1330,13 +1352,13 @@ export const App = cc(() => {
       const object = count.value; object.name = "changed";
       const early = later.value; const later = signal(1);
       return <div>{a}{b}{c}{d}{object}{early}{api.value}</div>;`);
-    expect(code).toContain("const api = useApi();");
-    expect(code).toContain("const a = save(count.value);");
-    expect(code).toContain("const b = count.value++;");
-    expect(code).toContain("const c = new Thing(count.value);");
-    expect(code).toContain("const d = (consume(), count.value);");
-    expect(code).toContain("const object = count.value;");
-    expect(code).toContain("const early = later.value;");
+    expectFragment(code, "const api = useApi();");
+    expectFragment(code, "const a = save(count.value);");
+    expectFragment(code, "const b = count.value++;");
+    expectFragment(code, "const c = new Thing(count.value);");
+    expectFragment(code, "const d = (consume(), count.value);");
+    expectFragment(code, "const object = count.value;");
+    expectFragment(code, "const early = later.value;");
   });
 
   it("does not promote module, helper, event, or render-callback locals", () => {
@@ -1351,7 +1373,7 @@ export const App = cc(() => {
       { hoist: false, derivedLocals: true },
     ).code;
     for (const name of ["global", "local", "clicked", "item"]) {
-      expect(code).toContain(`const ${name} = source.value;`);
+      expectFragment(code, `const ${name} = source.value;`);
     }
   });
 
@@ -1387,14 +1409,14 @@ export const App = cc(() => {
       });`;
     const options = { derivedLocals: true, hoist: false };
     const code = transformJSX(input, "derived.tsx", options).code;
-    expect(code).toContain("const positive = () => count() > 0;");
-    expect(code).toContain("const enabled = () => props.active && positive();");
-    expect(code).toContain("title={() => enabled()}");
-    expect(code).toContain("data-active={() => propOnly()}");
-    expect(code).toContain("const text = () => String(count());");
-    expect(code).toContain("const number = () => Number(count());");
-    expect(code).toContain("const bool = () => Boolean(count());");
-    expect(code).toContain(
+    expectFragment(code, "const positive = () => count() > 0;");
+    expectFragment(code, "const enabled = () => props.active && positive();");
+    expectFragment(code, "title={() => enabled()}");
+    expectFragment(code, "data-active={() => propOnly()}");
+    expectFragment(code, "const text = () => String(count());");
+    expectFragment(code, "const number = () => Number(count());");
+    expectFragment(code, "const bool = () => Boolean(count());");
+    expectFragment(code, 
       "const typed = () => source.value as number satisfies number;",
     );
     expect(transformJSX(code, "derived.tsx", options).code).toBe(code);
@@ -1423,7 +1445,7 @@ export const App = cc(() => {
         dev: true,
         derivedLocals: true,
       }).code;
-      expect(code).toContain("if (open())");
+      expectFragment(code, "if (open())");
       expect(warn).toHaveBeenCalledTimes(1);
       expect(String(warn.mock.calls[0]?.[0])).toContain(
         "setup if is read once",
@@ -1446,14 +1468,14 @@ export const App = cc(() => {
       return <div>{picked}{typed}{list}{called}{method}{bool}</div>;`);
     for (const fragment of [
       "picked = panels.value[index]",
-      "typed = source.value",
+      "typed = () => source.value",
       "list = source.value",
       "called = local()",
       "method = api.read()",
       "bool = Boolean(...args)",
       "unused = source.value",
     ]) {
-      expect(code).toContain(`const ${fragment};`);
+      expectFragment(code, `const ${fragment};`);
     }
   });
 
@@ -1469,19 +1491,19 @@ export const App = cc(() => {
       "derived.tsx",
       { hoist: false, derivedLocals: true },
     ).code;
-    expect(code).toContain("const value = () => source.value;");
-    expect(code).toContain("const value = 3;");
-    expect(code).toContain("consume(value);");
-    expect(code).toContain("value={() => value()}");
-    expect(code).toContain("value: value()");
+    expectFragment(code, "const value = () => source.value;");
+    expectFragment(code, "const value = 3;");
+    expectFragment(code, "consume(value);");
+    expectFragment(code, "value={() => value()}");
+    expectFragment(code, "value: value()");
   });
 
   it("leaves component tags, asserted write targets and direct eval scopes unchanged", () => {
     const code = compile(`const Widget = registry.value;
       const object = source.value; object!.name = "changed";
       return <Widget object={object} />;`);
-    expect(code).toContain("const Widget = registry.value;");
-    expect(code).toContain("const object = source.value;");
+    expectFragment(code, "const Widget = registry.value;");
+    expectFragment(code, "const object = source.value;");
     const evaluated = compile(
       `const value = source.value; eval("consume(value)"); return <div>{value}</div>;`,
     );
@@ -1500,8 +1522,8 @@ export const App = cc(() => {
     const code = compile(`const value = source.value;
       function helper() { const source = () => 1; return source; }
       return <div>{value}</div>;`);
-    expect(code).toContain("const value = () => source.value;");
-    expect(code).toContain("{() => value()}");
+    expectFragment(code, "const value = () => source.value;");
+    expectFragment(code, "{() => value()}");
   });
 
   it("honors declaration and initializer snapshot pragmas", () => {
@@ -1510,9 +1532,9 @@ export const App = cc(() => {
       const initial = /* sinwan-snapshot */ count.value;
       const live = count.value;
       return <div>{once}{initial}{live}</div>;`);
-    expect(code).toContain("const once = count.value;");
-    expect(code).toContain("const initial = /* sinwan-snapshot */count.value;");
-    expect(code).toContain("const live = () => count.value;");
+    expectFragment(code, "const once = count.value;");
+    expectFragment(code, "const initial = /* sinwan-snapshot */count.value;");
+    expectFragment(code, "const live = () => count.value;");
   });
 });
 
@@ -1521,20 +1543,20 @@ describe("transformJSX", () => {
     const code = `const Card = () => <div class="card"><p>Hello</p></div>;`;
     const result = transformJSX(code, "test.tsx");
 
-    expect(result.code).toContain("const _$tmpl_0");
-    expect(result.code).toContain(
+    expectFragment(result.code, "const _$tmpl_0");
+    expectFragment(result.code, 
       'html: "<div class=\\"card\\"><p>Hello</p></div>"',
     );
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0");
-    expect(result.code).toContain(
-      'import { _$createTemplate } from "sinwan/renderer"',
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0");
+    expectFragment(result.code, 
+      'import { _$createTemplate } from "sinwan/renderer/web"',
     );
   });
 
   it("emits HTML value for input defaultValue so the field shows its default", () => {
     const code = `const Form = () => <input name="endpoint" defaultValue="/api/hello" placeholder="/api/hello" />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'html: "<input name=\\"endpoint\\" value=\\"/api/hello\\" placeholder=\\"/api/hello\\" />"',
     );
     expect(result.code).not.toContain("defaultValue");
@@ -1543,7 +1565,7 @@ describe("transformJSX", () => {
   it("emits HTML checked for defaultChecked", () => {
     const code = `const Box = () => <input type="checkbox" defaultChecked />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'html: "<input type=\\"checkbox\\" checked />"',
     );
     expect(result.code).not.toContain("defaultChecked");
@@ -1552,15 +1574,15 @@ describe("transformJSX", () => {
   it("emits textarea defaultValue as text content", () => {
     const code = `const Note = () => <textarea defaultValue="hello" />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<textarea>hello</textarea>"');
+    expectFragment(result.code, 'html: "<textarea>hello</textarea>"');
     expect(result.code).not.toContain("defaultValue");
   });
 
   it("maps dynamic defaultValue slots to the HTML value attribute", () => {
     const code = `const Field = ({ v }) => <input defaultValue={v} />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<input value=\\"\\" />"');
-    expect(result.code).toContain('name: "defaultValue"');
+    expectFragment(result.code, 'html: "<input value=\\"\\" />"');
+    expectFragment(result.code, 'name: "defaultValue"');
   });
 
   it("does not hoist select with defaultValue so the enhancer can select options", () => {
@@ -1572,15 +1594,15 @@ describe("transformJSX", () => {
     );`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<select");
-    expect(result.code).toContain("defaultValue");
+    expectFragment(result.code, "<select");
+    expectFragment(result.code, "defaultValue");
   });
 
   it("does not hoist select with a controlled value", () => {
     const code = `const Field = ({ v }) => <select value={v}><option value="a">A</option></select>;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<select");
+    expectFragment(result.code, "<select");
   });
 
   it("slots nested select defaults through jsx while hoisting the shell", () => {
@@ -1592,15 +1614,15 @@ describe("transformJSX", () => {
       </div>
     );`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<div><!--s:0--></div>"');
-    expect(result.code).toContain("<select defaultValue");
+    expectFragment(result.code, 'html: "<div></div>"');
+    expectFragment(result.code, "<select defaultValue");
   });
 
   it("does not hoist a controlled textarea value", () => {
     const code = `const Note = ({ v }) => <textarea value={v} />;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<textarea");
+    expectFragment(result.code, "<textarea");
   });
 
   it("slots option selected through jsx so the enhancer still rejects it", () => {
@@ -1610,36 +1632,36 @@ describe("transformJSX", () => {
       </select>
     );`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<select><!--s:0--></select>"');
-    expect(result.code).toContain("<option selected");
+    expectFragment(result.code, 'html: "<select></select>"');
+    expectFragment(result.code, "<option selected");
   });
 
   it("does not hoist form with a function action", () => {
     const code = `const Page = ({ save }) => <form action={save}><button type="submit">Go</button></form>;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<form");
+    expectFragment(result.code, "<form");
   });
 
   it("does not hoist form with a spread and a function action", () => {
     const code = `const Page = ({ save, rest }) => <form {...rest} action={save}><button type="submit">Go</button></form>;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("action={save}");
+    expectFragment(result.code, "action={save}");
   });
 
   it("hoists a form with no action", () => {
     const code = `const Page = () => <form method="post"><button type="submit">Go</button></form>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
-    expect(result.code).toContain('method=\\"post\\"');
+    expectFragment(result.code, "_$createTemplate");
+    expectFragment(result.code, 'method=\\"post\\"');
   });
 
   it("hoists form with a string action", () => {
     const code = `const Page = () => <form action="/save"><button type="submit">Go</button></form>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
-    expect(result.code).toContain('action=\\"/save\\"');
+    expectFragment(result.code, "_$createTemplate");
+    expectFragment(result.code, 'action=\\"/save\\"');
   });
 
   it("does not hoist input or button with a function formAction", () => {
@@ -1678,13 +1700,13 @@ describe("transformJSX", () => {
     const code = `const Bar = ({ n }) => <progress value={n} />;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<progress");
+    expectFragment(result.code, "<progress");
   });
 
   it("hoists progress with a static value", () => {
     const code = `const Bar = () => <progress value="0.5" />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'html: "<progress value=\\"0.5\\"></progress>"',
     );
   });
@@ -1714,8 +1736,8 @@ describe("transformJSX", () => {
   it("slots nested title through jsx while hoisting the shell", () => {
     const code = `const Page = () => <div><title>Doc</title><p>body</p></div>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<div><!--s:0--><p>body</p></div>"');
-    expect(result.code).toContain("<title>Doc</title>");
+    expectFragment(result.code, 'html: "<div><!--s:0--><p>body</p></div>"');
+    expectFragment(result.code, "<title>Doc</title>");
   });
 
   it("hoists link, meta, and title with itemProp as body microdata", () => {
@@ -1785,25 +1807,26 @@ describe("transformJSX", () => {
     const code = `const Head = () => <title xml:lang="en">Doc</title>;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<title");
+    expectFragment(result.code, "<title");
   });
 
   it("does not hoist title with a spread even when itemProp is absent", () => {
     const code = `const Head = (props) => <title {...props}>Doc</title>;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<title");
+    expectFragment(result.code, "<title");
   });
 
-  it("handles dynamic children with comment markers", () => {
+  it("handles sole dynamic children via parent path fill", () => {
     const code = `const Card = ({ title }) => <div class="card"><h1>{title}</h1></div>;`;
     const result = transformJSX(code, "test.tsx");
 
-    expect(result.code).toContain("<!--s:0-->");
-    expect(result.code).toContain(
-      'slots: [{\n    path: [0, 0],\n    type: "child"\n  }]',
+    expect(result.code).not.toContain("<!--s:0-->");
+    expectFragment(result.code, 'html: "<div class=\\"card\\"><h1></h1></div>"');
+    expectFragment(result.code, 
+      'slots: [{\n    path: [0],\n    type: "child"\n  }]',
     );
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [title])");
   });
 
   it("leaves component calls untouched", () => {
@@ -1812,7 +1835,40 @@ describe("transformJSX", () => {
 
     // Card is capitalized, so it should NOT be compiled as a template
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<Card");
+    expectFragment(result.code, "<Card");
+  });
+
+  it("hoists native roots inside For children callbacks", () => {
+    const code = `const List = ({ items }) => (
+      <For each={items}>
+        {(row) => <tr class={row.cls}><td>{row.id}</td></tr>}
+      </For>
+    );`;
+    const result = transformJSX(code, "test.tsx");
+    expectFragment(result.code, "_$createTemplate");
+    expectFragment(result.code, "<tr");
+    expect(result.code).toMatch(/html:\s*"<tr/);
+    // Dynamic class/on* should not emit empty HTML placeholders on every clone.
+    expect(result.code).not.toMatch(/html:\s*"<tr class=\\"\\"/);
+  });
+
+  it("omits empty on* placeholders from hoisted event slots", () => {
+    const code = `const Btn = () => <button onClick={() => {}}>Go</button>;`;
+    const result = transformJSX(code, "test.tsx");
+    expectFragment(result.code, "_$createTemplate");
+    expect(result.code).toMatch(/html:\s*"<button>/);
+    expect(result.code).not.toMatch(/onclick=\\"\\"/);
+    expectFragment(result.code, 'type: "event"');
+  });
+
+  it("does not double-hoist structural children of a hoisted parent", () => {
+    const code = `const Card = () => <div class="card"><span class="inner">Hi</span></div>;`;
+    const result = transformJSX(code, "test.tsx");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0");
+    expect(result.code).not.toContain("_$tmpl_1");
+    expectFragment(result.code, 
+      'html: "<div class=\\"card\\"><span class=\\"inner\\">Hi</span></div>"',
+    );
   });
 
   it("preserves code with no JSX", () => {
@@ -1825,50 +1881,50 @@ describe("transformJSX", () => {
     const code = `const Card = (props) => <div {...props}><p>Hello</p></div>;`;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("<div");
-    expect(result.code).toContain("{...props}");
+    expectFragment(result.code, "<div");
+    expectFragment(result.code, "{...props}");
   });
 
   it("hoists elements with ref into template with ref slot", () => {
     const code = `const Input = () => <input ref={(el) => el?.focus()} />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
+    expectFragment(result.code, "_$createTemplate");
     // The ref expression should be passed as a dynamic
-    expect(result.code).toContain("focus");
+    expectFragment(result.code, "focus");
     // The template should have a ref slot
-    expect(result.code).toContain('type: "ref"');
+    expectFragment(result.code, 'type: "ref"');
   });
 
   it("hoists elements with object ref into template with ref slot", () => {
     const code = `const Input = () => { const r = { current: null }; return <input ref={r} />; };`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
-    expect(result.code).toContain('type: "ref"');
+    expectFragment(result.code, "_$createTemplate");
+    expectFragment(result.code, 'type: "ref"');
   });
 
   it("hoists elements with ref + dynamic attr into template with both slot types", () => {
     const code = `const Input = ({ placeholder }) => <input ref={(el) => el?.focus()} placeholder={placeholder} />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
-    expect(result.code).toContain('type: "ref"');
-    expect(result.code).toContain('type: "attr"');
+    expectFragment(result.code, "_$createTemplate");
+    expectFragment(result.code, 'type: "ref"');
+    expectFragment(result.code, 'type: "attr"');
   });
 
   it("hoists elements with ref + event handler into template with both slot types", () => {
     const code = `const Input = () => <input ref={(el) => el?.focus()} onclick={() => console.log("click")} />;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
-    expect(result.code).toContain('type: "ref"');
-    expect(result.code).toContain('type: "event"');
+    expectFragment(result.code, "_$createTemplate");
+    expectFragment(result.code, 'type: "ref"');
+    expectFragment(result.code, 'type: "event"');
   });
 
   it("hoists nested elements with ref with correct path", () => {
     const code = `const Form = () => <form><input ref={(el) => el?.focus()} /></form>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
-    expect(result.code).toContain('type: "ref"');
+    expectFragment(result.code, "_$createTemplate");
+    expectFragment(result.code, 'type: "ref"');
     // The input is at child index 0 of the form (root)
-    expect(result.code).toContain("path: [0]");
+    expectFragment(result.code, "path: [0]");
   });
 
   it("ignores whitespace JSXText when computing child paths", () => {
@@ -1878,12 +1934,13 @@ describe("transformJSX", () => {
       </div>
     );`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("<!--s:0-->");
-    // h1 should be at index 0 (whitespace stripped), not index 1
-    expect(result.code).toContain(
-      'slots: [{\n    path: [0, 0],\n    type: "child"\n  }]',
+    // Sole dynamic under <h1> uses parent-fill (no comment); h1 is child 0 of div.
+    expect(result.code).not.toContain("<!--s:0-->");
+    expectFragment(result.code, 'html: "<div><h1></h1></div>"');
+    expectFragment(result.code, 
+      'slots: [{\n    path: [0],\n    type: "child"\n  }]',
     );
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [title])");
   });
 
   it("hoists the static shell with a component child slot", () => {
@@ -1895,20 +1952,20 @@ describe("transformJSX", () => {
     );`;
     const result = transformJSX(code, "test.tsx");
     // The static <div> shell and <p> are hoisted; <Card> becomes a child slot.
-    expect(result.code).toContain("const _$tmpl_0");
-    expect(result.code).toContain("<!--s:0-->");
-    expect(result.code).toContain('html: "<div><!--s:0--><p>static</p></div>"');
-    expect(result.code).toContain(
+    expectFragment(result.code, "const _$tmpl_0");
+    expectFragment(result.code, "<!--s:0-->");
+    expectFragment(result.code, 'html: "<div><!--s:0--><p>static</p></div>"');
+    expectFragment(result.code, 
       'slots: [{\n    path: [0],\n    type: "child"\n  }]',
     );
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       '_$createTemplate(_$tmpl_0, [<Card title="hello" />])',
     );
   });
 
   it("hoists mixed tree with a reactive prop on the component child", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       import { cc } from "sinwan/component";
       const Card = cc(({ title }) => <p>{title}</p>);
       const App = () => {
@@ -1923,10 +1980,10 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     // Static shell is hoisted; the reactive prop read stays wrapped.
-    expect(result.code).toContain("<!--s:0-->");
-    expect(result.code).toContain('html: "<div><!--s:0--><p>static</p></div>"');
+    expectFragment(result.code, "<!--s:0-->");
+    expectFragment(result.code, 'html: "<div><!--s:0--><p>static</p></div>"');
     // The component JSX is emitted as a dynamic, with state.name wrapped.
-    expect(result.code).toContain("<Card title={() => state.name} />");
+    expectFragment(result.code, "<Card title={() => state.name} />");
   });
 
   it("hoists mixed tree with multiple component and native children", () => {
@@ -1939,15 +1996,15 @@ describe("transformJSX", () => {
     );`;
     const result = transformJSX(code, "test.tsx");
     // Two component child slots + one static <p> in the hoisted shell.
-    expect(result.code).toContain("<!--s:0-->");
-    expect(result.code).toContain("<!--s:1-->");
-    expect(result.code).toContain(
+    expectFragment(result.code, "<!--s:0-->");
+    expectFragment(result.code, "<!--s:1-->");
+    expectFragment(result.code, 
       'html: "<section><!--s:0--><p>intro</p><!--s:1--></section>"',
     );
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'slots: [{\n    path: [0],\n    type: "child"\n  }, {\n    path: [2],\n    type: "child"\n  }]',
     );
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [<Header />, <Footer />])",
     );
   });
@@ -1955,8 +2012,8 @@ describe("transformJSX", () => {
   it("hoists a component as the only child of a native element", () => {
     const code = `const App = () => <main><Card /></main>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<main><!--s:0--></main>"');
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [<Card />])");
+    expectFragment(result.code, 'html: "<main></main>"');
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [<Card />])");
   });
 
   it("warns in dev mode when hoisting is skipped", () => {
@@ -1990,14 +2047,14 @@ describe("transformJSX", () => {
 
   it("wraps createMutable property reads in JSX children", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const App = () => {
         const state = createMutable({ name: "" });
         return <p>Hello, {state.name}</p>;
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => state.name])",
     );
   });
@@ -2011,7 +2068,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => count.value])",
     );
   });
@@ -2025,21 +2082,21 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => count()])",
     );
   });
 
   it("wraps derived reactive expressions", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const App = () => {
         const state = createMutable({ count: 0 });
         return <p>{state.count + 1}</p>;
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => state.count + 1])",
     );
   });
@@ -2050,19 +2107,19 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("() => title");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [title])");
   });
 
   it("does not double-wrap event handlers", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const App = () => {
         const state = createMutable({ count: 0 });
         return <button onclick={() => state.count++}>click</button>;
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => state.count++])",
     );
     expect(result.code).not.toContain("() => () => state.count++");
@@ -2078,7 +2135,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => getStats()])",
     );
   });
@@ -2092,7 +2149,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("() => greet()");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [greet()])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [greet()])");
   });
 
   it("wraps local helpers whose only reactive read is inside a filter callback", () => {
@@ -2106,7 +2163,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("each={() => filtered()}");
+    expectFragment(result.code, "each={() => filtered()}");
   });
 
   it("wraps IIFE children that read a signal", () => {
@@ -2118,7 +2175,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => (() => query.value)()");
+    expectFragment(result.code, "() => (() => query.value)()");
   });
 
   it("does not wrap a factory that returns an event handler", () => {
@@ -2133,7 +2190,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("make()");
+    expectFragment(result.code, "make()");
     expect(result.code).not.toContain("() => make()");
   });
 
@@ -2149,9 +2206,9 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("each={() =>");
-    expect(result.code).toContain("_$unwrap(props).users");
-    expect(result.code).toContain("_$unwrap(props).label");
+    expectFragment(result.code, "each={() =>");
+    expectFragment(result.code, "_$unwrap(props).users");
+    expectFragment(result.code, "_$unwrap(props).label");
   });
 
   it("serializes static object styles into the HTML", () => {
@@ -2159,7 +2216,7 @@ describe("transformJSX", () => {
       const Box = () => <div style={{ backgroundColor: "red", width: "100px", padding: 8 }} />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'html: "<div style=\\"background-color:red;width:100px;padding:8\\"></div>"',
     );
     expect(result.code).not.toContain('name: "style"');
@@ -2170,7 +2227,7 @@ describe("transformJSX", () => {
       const Box = () => <div style="background: red; width: 100px;" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'html: "<div style=\\"background: red; width: 100px;\\"></div>"',
     );
     expect(result.code).not.toContain('name: "style"');
@@ -2185,8 +2242,8 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('style=\\"\\"');
-    expect(result.code).toContain('name: "style"');
+    expectFragment(result.code, 'style=\\"\\"');
+    expectFragment(result.code, 'name: "style"');
   });
 
   it("does not serialize reactive template literal styles into the HTML", () => {
@@ -2198,9 +2255,9 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<div style=\\"\\"></div>"');
-    expect(result.code).toContain('name: "style"');
-    expect(result.code).toContain("slots: [{");
+    expectFragment(result.code, 'html: "<div style=\\"\\"></div>"');
+    expectFragment(result.code, 'name: "style"');
+    expectFragment(result.code, "slots: [{");
     expect(result.code).not.toContain('html: "<div style=\\"color:');
   });
 
@@ -2212,8 +2269,8 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('html: "<div style=\\"\\"></div>"');
-    expect(result.code).toContain('name: "style"');
+    expectFragment(result.code, 'html: "<div style=\\"\\"></div>"');
+    expectFragment(result.code, 'name: "style"');
   });
 
   it("wraps reactive reads in JSX attributes", () => {
@@ -2225,7 +2282,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => count.value])",
     );
   });
@@ -2239,20 +2296,20 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => ");
-    expect(result.code).toContain("color.value");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [() => ");
+    expectFragment(result.code, "color.value");
   });
 
   it("wraps nested mutable member expressions", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const App = () => {
         const state = createMutable({ user: { name: "" } });
         return <p>{state.user.name}</p>;
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => state.user.name])",
     );
   });
@@ -2267,7 +2324,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       '_$createTemplate(_$tmpl_0, [() => ({\n    color: color.value,\n    width: width.value + "px"\n  })])',
     );
   });
@@ -2281,14 +2338,14 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => ({\n    active: active.value\n  })])",
     );
   });
 
   it("wraps destructured mutable property values", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const App = () => {
         const state = createMutable({ user: { name: "Ada" } });
         const { user } = state;
@@ -2297,12 +2354,12 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [() => name])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [() => name])");
   });
 
   it("does not wrap reactive reads passed as component props", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const App = () => {
         const state = createMutable({ user: { name: "Ada" } });
         const { user } = state;
@@ -2310,7 +2367,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("user={user}");
+    expectFragment(result.code, "user={user}");
     expect(result.code).not.toContain("user={() => user}");
   });
 
@@ -2323,7 +2380,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("<Child>{() => checked.value}</Child>");
+    expectFragment(result.code, "<Child>{() => checked.value}</Child>");
   });
 
   it("wraps signal reads and ternaries as user-component children", () => {
@@ -2337,7 +2394,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('{() => checked.value ? "On" : "Off"}');
+    expectFragment(result.code, '{() => checked.value ? "On" : "Off"}');
   });
 
   it("does not emit bindText for user-component children with explicitBindings", () => {
@@ -2351,7 +2408,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("{() => checked.value ?");
+    expectFragment(result.code, "{() => checked.value ?");
     expect(result.code).not.toContain("_$bindText(() => checked.value");
   });
 
@@ -2367,7 +2424,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).not.toContain("() => () =>");
-    expect(result.code).toContain('{() => checked.value ? "On" : "Off"}');
+    expectFragment(result.code, '{() => checked.value ? "On" : "Off"}');
   });
 
   it("wraps derived attributes on unknown imported components", () => {
@@ -2381,7 +2438,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("htmlFor={() => id.value}");
+    expectFragment(result.code, "htmlFor={() => id.value}");
   });
 
   it("does not emit bindAttr for component props with explicitBindings", () => {
@@ -2402,9 +2459,9 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("htmlFor={() => id.value}");
-    expect(result.code).toContain("each={() => items.value}");
-    expect(result.code).toContain("when={() => id.value}");
+    expectFragment(result.code, "htmlFor={() => id.value}");
+    expectFragment(result.code, "each={() => items.value}");
+    expectFragment(result.code, "when={() => id.value}");
     expect(result.code).not.toContain('_$bindAttr("htmlFor"');
     expect(result.code).not.toContain('_$bindAttr("each"');
     expect(result.code).not.toContain('_$bindAttr("when"');
@@ -2412,7 +2469,7 @@ describe("transformJSX", () => {
 
   it("does not wrap a non-null mutable object passed to an unknown component", () => {
     const code = `
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const App = () => {
         const state = createMutable({ user: { name: "Ada" } });
         const { user } = state;
@@ -2420,7 +2477,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("user={user!}");
+    expectFragment(result.code, "user={user!}");
     expect(result.code).not.toContain("user={() =>");
   });
 
@@ -2433,7 +2490,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("user={() => _$unwrap(props).user}");
+    expectFragment(result.code, "user={() => _$unwrap(props).user}");
   });
 
   it("still wraps reactive reads in DOM element attributes", () => {
@@ -2445,7 +2502,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => count.value");
+    expectFragment(result.code, "() => count.value");
   });
 
   it("wraps reactive prop reads in component JSX", () => {
@@ -2457,7 +2514,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     // props is a prop binding; member access on it must be unwrapped
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).user.name])",
     );
   });
@@ -2470,7 +2527,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).user.name])",
     );
   });
@@ -2483,7 +2540,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).count.value])",
     );
   });
@@ -2496,7 +2553,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("user={() => _$unwrap(props).user}");
+    expectFragment(result.code, "user={() => _$unwrap(props).user}");
   });
 
   it("wraps prop reads in DOM element attributes", () => {
@@ -2507,7 +2564,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => _$unwrap(props).count.value");
+    expectFragment(result.code, "() => _$unwrap(props).count.value");
   });
 
   it("does not wrap static string props in component JSX", () => {
@@ -2519,7 +2576,7 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [props.title])");
     expect(result.code).not.toContain("() => props.title");
   });
 
@@ -2532,7 +2589,7 @@ describe("transformJSX", () => {
       const App = () => <Child count={5} />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.count])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [props.count])");
     expect(result.code).not.toContain("() => props.count");
   });
 
@@ -2549,7 +2606,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
   });
@@ -2562,7 +2619,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
   });
@@ -2576,7 +2633,7 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
     expect(result.code).not.toContain(
@@ -2593,7 +2650,7 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [props.title])");
     expect(result.code).not.toContain("() => _$unwrap(props).title");
   });
 
@@ -2606,7 +2663,7 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
   });
@@ -2621,7 +2678,7 @@ describe("transformJSX", () => {
       const App = () => <Child title="Hello" />;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
   });
@@ -2642,7 +2699,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children])",
     );
   });
@@ -2656,7 +2713,7 @@ describe("transformJSX", () => {
       const App = () => <Child>Hello</Child>;
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children])",
     );
   });
@@ -2672,7 +2729,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
   });
@@ -2690,7 +2747,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
   });
@@ -2706,7 +2763,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children])",
     );
   });
@@ -2714,7 +2771,7 @@ describe("transformJSX", () => {
   it("tracks mutable props through transitive component calls", () => {
     const code = `
       import { cc } from "sinwan/component";
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       const Parent = cc(() => {
         const state = createMutable({ user: { name: "Ada" } });
         return <Child user={state.user} />;
@@ -2729,10 +2786,10 @@ describe("transformJSX", () => {
     const result = transformJSX(code, "test.tsx");
     // user arrives as a getter (forwarded through Child), so member access
     // must be unwrapped: _$unwrap(props).user.name
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).user.name])",
     );
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'import { unwrap as _$unwrap } from "sinwan/reactivity"',
     );
   });
@@ -2747,9 +2804,9 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("const raw = unwrap(props)");
-    expect(result.code).toContain("_$unwrap(props).user.name");
-    expect(result.code).toContain(
+    expectFragment(result.code, "const raw = unwrap(props)");
+    expectFragment(result.code, "_$unwrap(props).user.name");
+    expectFragment(result.code, 
       'import { unwrap as _$unwrap } from "sinwan/reactivity"',
     );
   });
@@ -2763,7 +2820,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$unwrap(props).user.name");
+    expectFragment(result.code, "_$unwrap(props).user.name");
     expect(result.code.match(/unwrap as _\$unwrap/g)?.length ?? 0).toBe(1);
   });
 
@@ -2785,7 +2842,7 @@ describe("transformJSX", () => {
     const result = transformJSX(code, "test.tsx");
     // count arrives as a getter wrapping the signal; unwrap gets the signal,
     // then .value reads it. Unlike resolve, unwrap does NOT double-unwrap.
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).count.value])",
     );
   });
@@ -2804,7 +2861,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [props.title])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [props.title])");
     expect(result.code).not.toContain("() => _$unwrap(props).title");
   });
 
@@ -2824,7 +2881,7 @@ describe("transformJSX", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
+    expectFragment(result.code, "_$createTemplate");
   });
 
   it("emits explicit text binding descriptors when explicitBindings is enabled", () => {
@@ -2836,9 +2893,9 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("import { _$createTemplate, _$bindText");
-    expect(result.code).toContain("_$bindText(() => count.value)");
-    expect(result.code).toContain(
+    expectFragment(result.code, "import { _$createTemplate, _$bindText");
+    expectFragment(result.code, "_$bindText(() => count.value)");
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [_$bindText(() => count.value)])",
     );
   });
@@ -2852,8 +2909,8 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("_$bindAttr");
-    expect(result.code).toContain('_$bindAttr("title", () => count.value)');
+    expectFragment(result.code, "_$bindAttr");
+    expectFragment(result.code, '_$bindAttr("title", () => count.value)');
   });
 
   it("emits explicit style and class binding descriptors when explicitBindings is enabled", () => {
@@ -2866,10 +2923,10 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("_$bindStyle");
-    expect(result.code).toContain("_$bindClass");
-    expect(result.code).toContain("_$bindStyle(() => ({");
-    expect(result.code).toContain("_$bindClass(() => ({");
+    expectFragment(result.code, "_$bindStyle");
+    expectFragment(result.code, "_$bindClass");
+    expectFragment(result.code, "_$bindStyle(() => ({");
+    expectFragment(result.code, "_$bindClass(() => ({");
   });
 
   it("does not wrap a mapped element list when inner text is already bindText", () => {
@@ -2886,7 +2943,7 @@ describe("transformJSX", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("_$bindText(() => count.value)");
+    expectFragment(result.code, "_$bindText(() => count.value)");
     expect(result.code).not.toContain('() => ["a"].map');
     expect(result.code).not.toContain('() => ["b"].map');
   });
@@ -2897,7 +2954,7 @@ describe("transformJSX", () => {
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
     expect(result.code).not.toContain("_$bindText(() => title)");
-    expect(result.code).toContain("_$createTemplate(_$tmpl_0, [title])");
+    expectFragment(result.code, "_$createTemplate(_$tmpl_0, [title])");
   });
 
   it("does not wrap children passthrough as bindText with explicitBindings", () => {
@@ -2912,7 +2969,7 @@ describe("transformJSX", () => {
     expect(result.code).not.toContain(
       "_$bindText(() => _$unwrap(props).children)",
     );
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).children]",
     );
   });
@@ -2924,7 +2981,7 @@ describe("transformJSX", () => {
     try {
       const code = 'const Box = () => <div style="color:${color};" />;';
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain('style=\\"color:${color};\\"');
+      expectFragment(result.code, 'style=\\"color:${color};\\"');
       expect(warnings.length).toBe(1);
       expect(warnings[0]).toContain(
         'JSX string literal style attribute contains "${...}"',
@@ -2970,7 +3027,7 @@ describe("transformJSX", () => {
       const result = transformJSX(childCode, "/project/Child.tsx", {
         analyze: metaPath,
       });
-      expect(result.code).toContain(
+      expectFragment(result.code, 
         "_$createTemplate(_$tmpl_0, [props.title])",
       );
       expect(result.code).not.toContain("() => _$unwrap(props).title");
@@ -2989,7 +3046,7 @@ describe("transformJSX", () => {
     const result = transformJSX(code, "/project/Child.tsx", {
       analyze: "/nonexistent/sinwan-reactive-props.json",
     });
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$createTemplate(_$tmpl_0, [() => _$unwrap(props).title])",
     );
   });
@@ -3035,7 +3092,7 @@ describe("transformJSX", () => {
     });
     // The class expression must be wrapped in a zero-arity getter so the
     // runtime can re-evaluate it when `count` changes.
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'class={() => `base ${count() === 4 ? "red" : "blue"}`}',
     );
   });
@@ -3073,7 +3130,7 @@ describe("transformJSX", () => {
     });
     // Static string must remain eager (no getter) — the prop is reactive but
     // the value contains no reactive reads.
-    expect(result.code).toContain('class="always-static"');
+    expectFragment(result.code, 'class="always-static"');
     expect(result.code).not.toContain("class={() =>");
   });
 
@@ -3092,7 +3149,7 @@ describe("transformJSX", () => {
     const result = transformJSX(parentCode, "/project/App.tsx", {
       analyzeMetadata: new Map(),
     });
-    expect(result.code).toContain("class={() =>");
+    expectFragment(result.code, "class={() =>");
   });
 });
 
@@ -3107,7 +3164,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("each={() => Array.from");
+      expectFragment(result.code, "each={() => Array.from");
     });
 
     it("does NOT wrap For each with static array", () => {
@@ -3139,8 +3196,8 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("each={() =>");
-      expect(result.code).toContain("query.value");
+      expectFragment(result.code, "each={() =>");
+      expectFragment(result.code, "query.value");
       expect(result.code).not.toContain("each={() => () =>");
     });
 
@@ -3154,8 +3211,8 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("each={() =>");
-      expect(result.code).toContain("query.value");
+      expectFragment(result.code, "each={() =>");
+      expectFragment(result.code, "query.value");
     });
 
     it("wraps For each when a signal is read inside a function-expression callback", () => {
@@ -3171,8 +3228,8 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("each={() =>");
-      expect(result.code).toContain("query.value");
+      expectFragment(result.code, "each={() =>");
+      expectFragment(result.code, "query.value");
     });
 
     it("wraps For each when a signal is a map callback default and a spread arg", () => {
@@ -3189,8 +3246,8 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("each={() =>");
-      expect(result.code).toContain("query.value");
+      expectFragment(result.code, "each={() =>");
+      expectFragment(result.code, "query.value");
     });
 
     it("does NOT wrap For each with a static map callback", () => {
@@ -3216,8 +3273,8 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-      expect(result.code).toContain("each={() =>");
-      expect(result.code).toContain("query.value");
+      expectFragment(result.code, "each={() =>");
+      expectFragment(result.code, "query.value");
       expect(result.code).not.toContain('_$bindAttr("each"');
       expect(result.code).not.toContain("each={() => () =>");
     });
@@ -3231,7 +3288,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("when={() => visible.value");
+      expectFragment(result.code, "when={() => visible.value");
     });
 
     it("does NOT wrap Show when with static boolean", () => {
@@ -3253,7 +3310,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("when={() => mode.value");
+      expectFragment(result.code, "when={() => mode.value");
     });
 
     it("wraps Match when with reactive signal", () => {
@@ -3265,7 +3322,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("when={() => active.value");
+      expectFragment(result.code, "when={() => active.value");
     });
 
     it("wraps Index each with reactive signal", () => {
@@ -3277,7 +3334,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("each={() => items.value");
+      expectFragment(result.code, "each={() => items.value");
     });
 
     it("wraps Key when with reactive signal", () => {
@@ -3289,7 +3346,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("when={() => key.value");
+      expectFragment(result.code, "when={() => key.value");
     });
 
     it("wraps Dynamic component with reactive signal", () => {
@@ -3301,7 +3358,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("component={() => tag.value");
+      expectFragment(result.code, "component={() => tag.value");
     });
 
     it("wraps Visible when with reactive signal", () => {
@@ -3313,7 +3370,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("when={() => show.value");
+      expectFragment(result.code, "when={() => show.value");
     });
 
     it("wraps Portal mount with reactive signal", () => {
@@ -3325,7 +3382,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("mount={() => target.value");
+      expectFragment(result.code, "mount={() => target.value");
     });
 
     it("wraps Virtual each with reactive signal", () => {
@@ -3337,7 +3394,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("each={() => items.value");
+      expectFragment(result.code, "each={() => items.value");
     });
 
     it("wraps Activity mode with reactive signal", () => {
@@ -3349,7 +3406,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("mode={() => mode.value");
+      expectFragment(result.code, "mode={() => mode.value");
     });
 
     it("does NOT wrap non-reactive prop on built-in (For fallback)", () => {
@@ -3373,7 +3430,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("fallback={() => loading.value}");
+      expectFragment(result.code, "fallback={() => loading.value}");
     });
   });
 
@@ -3393,7 +3450,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("label={() => count()}");
+      expectFragment(result.code, "label={() => count()}");
     });
 
     it("does NOT wrap static prop on user component", () => {
@@ -3427,7 +3484,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("label={() => count()}");
+      expectFragment(result.code, "label={() => count()}");
       expect(result.code).not.toContain("staticProp={() =>");
     });
 
@@ -3440,7 +3497,7 @@ describe("reactive component prop wrapping", () => {
         };
       `;
       const result = transformJSX(code, "test.tsx");
-      expect(result.code).toContain("() => arr().length");
+      expectFragment(result.code, "() => arr().length");
     });
   });
 });
@@ -3461,8 +3518,10 @@ describe("template slot path generation", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("path: [0, 0]");
-    expect(result.code).toContain("path: [1]");
+    // Sole dynamic under <span> → parent-fill at path [0]; class attr on button at [1].
+    expectFragment(result.code, "path: [0]");
+    expectFragment(result.code, "path: [1]");
+    expectFragment(result.code, 'html: "<div><span></span><button>btn</button></div>"');
   });
 
   it("generates correct slot paths with multiple reactive children in same parent", () => {
@@ -3482,9 +3541,10 @@ describe("template slot path generation", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("path: [0, 0]");
-    expect(result.code).toContain("path: [1, 0]");
-    expect(result.code).toContain("path: [2, 0]");
+    expectFragment(result.code, 
+      'slots: [{\n    path: [0],\n    type: "child"\n  }, {\n    path: [1],\n    type: "child"\n  }, {\n    path: [2],\n    type: "child"\n  }]',
+    );
+    expect(result.code).not.toContain("<!--s:");
   });
 
   it("handles JSXFragment children without dropping them", () => {
@@ -3503,9 +3563,9 @@ describe("template slot path generation", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("frag1");
-    expect(result.code).toContain("frag2");
-    expect(result.code).toContain("after");
+    expectFragment(result.code, "frag1");
+    expectFragment(result.code, "frag2");
+    expectFragment(result.code, "after");
   });
 
   it("generates correct slot paths for reactive children inside JSXFragment", () => {
@@ -3527,9 +3587,11 @@ describe("template slot path generation", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("path: [1, 0]");
-    expect(result.code).toContain("path: [2, 0]");
-    expect(result.code).toContain("after");
+    // Fragment children share the parent path; sole-dynamic spans use parent-fill.
+    expectFragment(result.code, "path: [1]");
+    expectFragment(result.code, "path: [2]");
+    expectFragment(result.code, "after");
+    expect(result.code).not.toContain("<!--s:");
   });
 
   it("handles nested JSXFragments", () => {
@@ -3549,9 +3611,9 @@ describe("template slot path generation", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("outer");
-    expect(result.code).toContain("inner");
-    expect(result.code).toContain("end");
+    expectFragment(result.code, "outer");
+    expectFragment(result.code, "inner");
+    expectFragment(result.code, "end");
   });
 
   it("generates correct slot paths with attr and event on same element after reactive sibling", () => {
@@ -3569,10 +3631,10 @@ describe("template slot path generation", () => {
       };
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("path: [0]");
-    expect(result.code).toContain("path: [1]");
-    expect(result.code).toContain('name: "class"');
-    expect(result.code).toContain('name: "onclick"');
+    expectFragment(result.code, "path: [0]");
+    expectFragment(result.code, "path: [1]");
+    expectFragment(result.code, 'name: "class"');
+    expectFragment(result.code, 'name: "onclick"');
   });
 });
 
@@ -3585,21 +3647,21 @@ describe("auto-cc wrapping", () => {
       }
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('import { cc } from "sinwan/component";');
+    expectFragment(result.code, 'import { cc } from "sinwan/component";');
     expect(result.code).toMatch(/export const App = cc\(function App\(\)/);
   });
 
   it("wraps an exported const arrow returning JSX with cc()", () => {
     const code = `export const Card = (props) => <div>{props.title}</div>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('import { cc } from "sinwan/component";');
-    expect(result.code).toMatch(/export const Card = cc\(props =>/);
+    expectFragment(result.code, 'import { cc } from "sinwan/component";');
+    expectFragment(result.code, "export const Card = cc((props) =>");
   });
 
   it("wraps a default-exported named function declaration, preserving binding", () => {
     const code = `export default function App() { return <div/>; }`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('import { cc } from "sinwan/component";');
+    expectFragment(result.code, 'import { cc } from "sinwan/component";');
     expect(result.code).toMatch(/function App\(\)/);
     expect(result.code).toMatch(/export default cc\(App\)/);
   });
@@ -3607,7 +3669,7 @@ describe("auto-cc wrapping", () => {
   it("wraps a default-exported arrow with cc()", () => {
     const code = `export default () => <div/>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('import { cc } from "sinwan/component";');
+    expectFragment(result.code, 'import { cc } from "sinwan/component";');
     expect(result.code).toMatch(/export default cc\(\(\) =>/);
   });
 
@@ -3647,7 +3709,7 @@ describe("auto-cc wrapping", () => {
     `;
     const result = transformJSX(code, "test.tsx");
     expect(result.code).toMatch(/export const App = cc\(function App\(\)/);
-    expect(result.code).toContain("() => count.value");
+    expectFragment(result.code, "() => count.value");
   });
 });
 
@@ -3668,9 +3730,9 @@ describe("hook and inject signal wrapping", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => theme.value");
-    expect(result.code).toContain("() => resolved.value");
-    expect(result.code).toContain("() => api.theme.value");
+    expectFragment(result.code, "() => theme.value");
+    expectFragment(result.code, "() => resolved.value");
+    expectFragment(result.code, "() => api.theme.value");
   });
 
   it("wraps hook .value on imported component props inside a static map", () => {
@@ -3693,7 +3755,7 @@ describe("hook and inject signal wrapping", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       'variant={() => theme.value === value ? "default" : "outline"}',
     );
     expect(result.code).not.toContain("() => themes.map");
@@ -3713,8 +3775,8 @@ describe("hook and inject signal wrapping", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("_$bindText(() => theme.value)");
-    expect(result.code).toContain(
+    expectFragment(result.code, "_$bindText(() => theme.value)");
+    expectFragment(result.code, 
       'variant={() => theme.value === "dark" ? "default" : "outline"}',
     );
     expect(result.code).not.toContain('_$bindAttr("variant"');
@@ -3739,11 +3801,11 @@ describe("hook and inject signal wrapping", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => count()");
-    expect(result.code).toContain("() => counter()");
-    expect(result.code).toContain("() => api.count()");
-    expect(result.code).toContain("() => count?.()");
-    expect(result.code).toContain("disabled={() => count() > 0}");
+    expectFragment(result.code, "() => count()");
+    expectFragment(result.code, "() => counter()");
+    expectFragment(result.code, "() => api.count()");
+    expectFragment(result.code, "() => count?.()");
+    expectFragment(result.code, "disabled={() => count() > 0}");
   });
 
   it("wraps hook getters as bindText with explicitBindings", () => {
@@ -3755,13 +3817,13 @@ describe("hook and inject signal wrapping", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain("_$bindText(() => count())");
+    expectFragment(result.code, "_$bindText(() => count())");
   });
 
   it("does not wrap local helpers, calls with arguments, or store methods", () => {
     const code = `
       import { cc } from "sinwan/component";
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       import { computed, signal } from "sinwan/reactivity";
       import { useState } from "sinwan/react";
       export const App = cc(() => {
@@ -3795,7 +3857,7 @@ describe("hook and inject signal wrapping", () => {
     expect(result.code).not.toContain("() => helpers.x()");
     expect(result.code).not.toContain("() => n.foo()");
     expect(result.code).not.toContain('() => format("x").count()');
-    expect(result.code).toContain("make()");
+    expectFragment(result.code, "make()");
     expect(result.code).not.toContain("() => make()");
   });
 });
@@ -3811,7 +3873,7 @@ describe("useFetch reactive tracking", () => {
       }
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => data?.value?.message");
+    expectFragment(result.code, "() => data?.value?.message");
   });
 
   it("wraps property-access reads on a useFetch shell (signalObject)", () => {
@@ -3830,7 +3892,7 @@ describe("useFetch reactive tracking", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => f.data.value!.name");
+    expectFragment(result.code, "() => f.data.value!.name");
   });
 
   it("does NOT wrap the useFetch shell object or a bare property (signal object)", () => {
@@ -3882,7 +3944,7 @@ describe("optional chaining and non-null reactive reads", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => s.value?.n");
+    expectFragment(result.code, "() => s.value?.n");
   });
 
   it("wraps non-null-asserted signal reads (s.value!.n)", () => {
@@ -3894,7 +3956,7 @@ describe("optional chaining and non-null reactive reads", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => s.value!.n");
+    expectFragment(result.code, "() => s.value!.n");
   });
 
   it("wraps optional + non-null mixed chains", () => {
@@ -3906,7 +3968,7 @@ describe("optional chaining and non-null reactive reads", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => s.value?.a!.b");
+    expectFragment(result.code, "() => s.value?.a!.b");
   });
 });
 
@@ -3921,7 +3983,7 @@ describe("built-in control-flow direct reactive children", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("{() => s.value?.msg}");
+    expectFragment(result.code, "{() => s.value?.msg}");
   });
 
   it("does NOT wrap a render-prop function child of <Show>", () => {
@@ -3948,7 +4010,7 @@ describe("built-in control-flow direct reactive children", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain(">content</Show>");
+    expectFragment(result.code, ">content</Show>");
   });
 
   it("wraps reactive children forwarded to a user component", () => {
@@ -3962,7 +4024,7 @@ describe("built-in control-flow direct reactive children", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('{() => checked.value ? "On" : "Off"}');
+    expectFragment(result.code, '{() => checked.value ? "On" : "Off"}');
   });
 });
 
@@ -3982,25 +4044,25 @@ describe("template protocol and hoist edge cases", () => {
       </p>
     );`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("hello world");
+    expectFragment(result.code, "hello world");
   });
 
   it("serializes an empty template-literal style", () => {
     const code = "const Card = () => <div style={``}></div>;";
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('style=\\"\\"');
+    expectFragment(result.code, 'style=\\"\\"');
   });
 
   it("emits boolean attributes without a value", () => {
     const code = `const Btn = () => <button disabled>Go</button>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("<button disabled>");
+    expectFragment(result.code, "<button disabled>");
   });
 
   it("skips hoisting when a member-expression child looks like a component", () => {
     const code = `const App = () => <div><Icons.Star /></div>;`;
     const result = transformJSX(code, "test.tsx", { dev: true });
-    expect(result.code).toContain("<Icons.Star");
+    expectFragment(result.code, "<Icons.Star");
     expect(result.code).not.toContain("_$createTemplate");
   });
 
@@ -4016,8 +4078,8 @@ describe("template protocol and hoist edge cases", () => {
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
     expect(result.code).not.toContain("_$createTemplate");
-    expect(result.code).toContain("_$bindText");
-    expect(result.code).toContain('from "sinwan/renderer"');
+    expectFragment(result.code, "_$bindText");
+    expectFragment(result.code, 'from "sinwan/renderer/web"');
   });
 });
 
@@ -4025,7 +4087,7 @@ describe("auto-cc additional candidates", () => {
   it("wraps an anonymous default-exported function declaration", () => {
     const code = `export default function () { return <div/>; }`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("export default cc(function");
+    expectFragment(result.code, "export default cc(function");
   });
 
   it("does not wrap generator function expressions", () => {
@@ -4048,19 +4110,19 @@ describe("auto-cc additional candidates", () => {
   it("wraps a component that returns JSX inside an array", () => {
     const code = `export function List() { return [[<div key="a" />]]; }`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("export const List = cc(");
+    expectFragment(result.code, "export const List = cc(");
   });
 
   it("leaves namespaced child tags out of the HTML template", () => {
     const code = `const Icon = () => <div><svg:rect /></div>;`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$createTemplate");
+    expectFragment(result.code, "_$createTemplate");
   });
 
   it("wraps a component that returns JSX inside an object", () => {
     const code = `export function Node() { return { el: <div/> }; }`;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("export const Node = cc(");
+    expectFragment(result.code, "export const Node = cc(");
   });
 
   it("does not wrap an arrow whose body is only a nested function", () => {
@@ -4074,7 +4136,7 @@ describe("additional reactive wrap paths", () => {
   it("wraps createStore and computed reads", () => {
     const storeCode = `
       import { cc } from "sinwan/component";
-      import { createStore } from "sinwan/store";
+      import { createStore } from "sinway";
       export const App = cc(() => {
         const [state] = createStore({ n: 1 });
         return <p>{state.n}</p>;
@@ -4134,7 +4196,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => doubled()");
+    expectFragment(result.code, "() => doubled()");
   });
 
   it("treats rest-parameter components as having no named props", () => {
@@ -4143,7 +4205,7 @@ describe("additional reactive wrap paths", () => {
       export const App = cc((...args) => <div>{args[0]}</div>);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("args[0]");
+    expectFragment(result.code, "args[0]");
   });
 
   it("tracks string-literal keys in object spreads", () => {
@@ -4157,7 +4219,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("<Child");
+    expectFragment(result.code, "<Child");
   });
 
   it("resolves a local object-literal variable in a same-file spread", () => {
@@ -4172,13 +4234,13 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("{...props}");
+    expectFragment(result.code, "{...props}");
   });
 
   it("wraps non-null asserted destructured mutable values", () => {
     const code = `
       import { cc } from "sinwan/component";
-      import { createMutable } from "sinwan/store";
+      import { createMutable } from "sinway";
       export const App = cc(() => {
         const state = createMutable({ name: "Ada" });
         const { name } = state;
@@ -4186,7 +4248,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => name!");
+    expectFragment(result.code, "() => name!");
   });
 
   it("does not wrap a useFetch property that is not .value", () => {
@@ -4213,7 +4275,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("title={() => f.data.value}");
+    expectFragment(result.code, "title={() => f.data.value}");
   });
 
   it("does not look inside nested functions when checking a prop value", () => {
@@ -4227,7 +4289,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("title={() => s.value}");
+    expectFragment(result.code, "title={() => s.value}");
     expect(result.code).not.toContain("title={() => () =>");
   });
 
@@ -4241,7 +4303,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => s.value");
+    expectFragment(result.code, "() => s.value");
   });
 
   it("resolves member-expression component names", () => {
@@ -4255,7 +4317,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("<Mod.Show");
+    expectFragment(result.code, "<Mod.Show");
   });
 
   it("unwraps non-null asserted prop member access", () => {
@@ -4266,7 +4328,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$unwrap(props).user");
+    expectFragment(result.code, "_$unwrap(props).user");
   });
 
   it("reuses an existing unwrap import", () => {
@@ -4279,9 +4341,9 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("_$unwrap(props).user");
-    expect(result.code).toContain("void unwrap");
-    expect(result.code).toContain(
+    expectFragment(result.code, "_$unwrap(props).user");
+    expectFragment(result.code, "void unwrap");
+    expectFragment(result.code, 
       'import { unwrap as _$unwrap } from "sinwan/reactivity"',
     );
   });
@@ -4301,7 +4363,7 @@ describe("additional reactive wrap paths", () => {
       const result = transformJSX(code, "test.tsx", {
         analyze: tmp,
       });
-      expect(result.code).toContain("() => s.value");
+      expectFragment(result.code, "() => s.value");
     } finally {
       fs.rmSync(tmp, { force: true });
     }
@@ -4319,7 +4381,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("{() => a.value}{() => b.value}");
+    expectFragment(result.code, "{() => a.value}{() => b.value}");
   });
 
   it("treats export default of a cc() variable as exported", () => {
@@ -4334,7 +4396,7 @@ describe("additional reactive wrap paths", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("title={() => s.value}");
+    expectFragment(result.code, "title={() => s.value}");
   });
 });
 
@@ -4347,16 +4409,16 @@ describe("live cc destructure", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("cc(props => {");
-    expect(result.code).toContain("_$createLiveRest(props,");
-    expect(result.code).toContain("..._$getSpreadProps(rest)");
-    expect(result.code).toContain('props["data-id"]');
-    expect(result.code).toContain(
+    expectFragment(result.code, "cc(props => {");
+    expectFragment(result.code, "_$createLiveRest(props,");
+    expectFragment(result.code, "..._$getSpreadProps(rest)");
+    expectFragment(result.code, 'props["data-id"]');
+    expectFragment(result.code, 
       'value={() => _$unwrap(props).value === void 0 ? "" : _$unwrap(props).value}',
     );
-    expect(result.code).toContain("extra: _$unwrap(props).extra");
-    expect(result.code).toContain("createLiveRest as _$createLiveRest");
-    expect(result.code).toContain("getSpreadProps as _$getSpreadProps");
+    expectFragment(result.code, "extra: _$unwrap(props).extra");
+    expectFragment(result.code, "createLiveRest as _$createLiveRest");
+    expectFragment(result.code, "getSpreadProps as _$getSpreadProps");
   });
 
   it("leaves nested destructure as a snapshot", () => {
@@ -4365,7 +4427,7 @@ describe("live cc destructure", () => {
       export const Child = cc(({ user: { name } }) => <p>{name}</p>);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("user: {");
+    expectFragment(result.code, "user: {");
     expect(result.code).not.toContain("props.user");
   });
 
@@ -4376,7 +4438,7 @@ describe("live cc destructure", () => {
       export const Child = cc(({ [key]: title }) => <h1>{title}</h1>);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("[key]: title");
+    expectFragment(result.code, "[key]: title");
   });
 
   it("spreads identifier props through getSpreadProps", () => {
@@ -4385,7 +4447,7 @@ describe("live cc destructure", () => {
       export const Box = cc((props) => <div {...props} />);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("{..._$getSpreadProps(props)}");
+    expectFragment(result.code, "{..._$getSpreadProps(props)}");
   });
 
   it("does not rewrite a nested function's shadowed props spread", () => {
@@ -4397,8 +4459,8 @@ describe("live cc destructure", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("<div {..._$getSpreadProps(props)}>");
-    expect(result.code).toContain("<span {...props} />");
+    expectFragment(result.code, "<div {..._$getSpreadProps(props)}>");
+    expectFragment(result.code, "<span {...props} />");
   });
 
   it("picks a free props identifier when props is destructured", () => {
@@ -4407,9 +4469,9 @@ describe("live cc destructure", () => {
       export const Child = cc(({ props, _props }) => <span>{props}{_props}</span>);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("cc(_props1 =>");
-    expect(result.code).toContain("_$unwrap(_props1).props");
-    expect(result.code).toContain("_$unwrap(_props1)._props");
+    expectFragment(result.code, "cc(_props1 =>");
+    expectFragment(result.code, "_$unwrap(_props1).props");
+    expectFragment(result.code, "_$unwrap(_props1)._props");
   });
 
   it("rewrites auto-cc destructure and copies TypeScript annotations", () => {
@@ -4419,8 +4481,8 @@ describe("live cc destructure", () => {
       }
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("cc(function Card(props: {");
-    expect(result.code).toContain("_$unwrap(props).title");
+    expectFragment(result.code, "cc(function Card(props: {");
+    expectFragment(result.code, "_$unwrap(props).title");
   });
 
   it("merges helpers into an existing sinwan import", () => {
@@ -4429,9 +4491,9 @@ describe("live cc destructure", () => {
       export const Box = cc((props) => <section {...props} />);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('from "sinwan"');
-    expect(result.code).toContain("getSpreadProps as _$getSpreadProps");
-    expect(result.code).toContain("{..._$getSpreadProps(props)}");
+    expectFragment(result.code, 'from "sinwan"');
+    expectFragment(result.code, "getSpreadProps as _$getSpreadProps");
+    expectFragment(result.code, "{..._$getSpreadProps(props)}");
   });
 
   it("skips helper import when the local alias already exists", () => {
@@ -4443,7 +4505,7 @@ describe("live cc destructure", () => {
     const matches =
       result.code.match(/getSpreadProps as _\$getSpreadProps/g) ?? [];
     expect(matches.length).toBe(1);
-    expect(result.code).toContain("{..._$getSpreadProps(props)}");
+    expectFragment(result.code, "{..._$getSpreadProps(props)}");
   });
 
   it("converts an expression-body rest destructure into a block", () => {
@@ -4452,8 +4514,8 @@ describe("live cc destructure", () => {
       export const Chip = cc(({ label, ...rest }) => <span {...rest}>{label}</span>);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("const rest = _$createLiveRest(props");
-    expect(result.code).toContain("return <span {..._$getSpreadProps(rest)}>");
+    expectFragment(result.code, "const rest = _$createLiveRest(props");
+    expectFragment(result.code, "return <span {..._$getSpreadProps(rest)}>");
   });
 
   it("tracks createLiveRest results as live prop bags", () => {
@@ -4465,7 +4527,7 @@ describe("live cc destructure", () => {
       });
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("() => _$unwrap(rest).extra");
+    expectFragment(result.code, "() => _$unwrap(rest).extra");
   });
 
   it("does not rewrite array-pattern cc params", () => {
@@ -4474,7 +4536,7 @@ describe("live cc destructure", () => {
       export const Row = cc(([item]) => <li>{item}</li>);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain("cc(([item])");
+    expectFragment(result.code, "cc(([item])");
   });
 
   it("ignores cc calls that are not functions", () => {
@@ -4484,7 +4546,7 @@ describe("live cc destructure", () => {
       export const App = cc(() => <div />);
     `;
     const result = transformJSX(code, "test.tsx");
-    expect(result.code).toContain('cc("x")');
+    expectFragment(result.code, 'cc("x")');
   });
 
   it("does not treat nested .children members as children passthrough", () => {
@@ -4493,7 +4555,7 @@ describe("live cc destructure", () => {
       export const Menu = cc((props) => <div>{props.meta.children}</div>);
     `;
     const result = transformJSX(code, "test.tsx", { explicitBindings: true });
-    expect(result.code).toContain(
+    expectFragment(result.code, 
       "_$bindText(() => _$unwrap(props).meta.children)",
     );
   });

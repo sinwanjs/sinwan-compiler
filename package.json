@@ -1,6 +1,6 @@
 {
   "name": "sinwan-compiler",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "Shared compiler core for Sinwan plugins",
   "type": "module",
   "main": "./dist/index.js",
@@ -37,16 +37,12 @@
     "prepublishOnly": "bun run clean && bun run typecheck && bun run test && bun run build"
   },
   "devDependencies": {
-    "@types/babel__generator": "^7.27.0",
-    "@types/babel__traverse": "^7.28.0",
+    "@oxc-project/types": "^0.150.0",
     "@types/bun": "latest"
   },
   "dependencies": {
-    "@babel/core": "^7.29.7",
-    "@babel/generator": "^7.29.8",
-    "@babel/parser": "^7.29.8",
-    "@babel/traverse": "^7.29.8",
-    "@babel/types": "^7.29.8"
+    "esrap": "^2.3.7",
+    "oxc-parser": "^0.150.0"
   },
   "peerDependencies": {
     "typescript": ">=5.0.0 <8.0.0"

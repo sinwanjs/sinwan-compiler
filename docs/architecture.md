@@ -6,6 +6,7 @@ This page is for people changing the compiler. App authors can stay on [Transfor
 
 ```
 src/
+  ast/               oxc parse, Path/Scope, esrap print
   index.ts           Public exports
   auto-cc.ts         Exported function → cc(...)
   live-cc-destructure.ts  Flat cc(({ value }) => …) → props.value
@@ -15,6 +16,21 @@ src/
   cli.ts             analyze CLI
   exports.ts         collectExportedComponents
 ```
+
+## AST pipeline
+
+`transformJSX` and analyze parse with **oxc-parser** (`parseSync`, ESTree / TS-ESTree). The compiler parses as TSX so JSX and TypeScript are accepted in `.js`, `.jsx`, `.ts`, and `.tsx`, matching the previous Babel plugin set. Comments are copied onto `leadingComments` / `trailingComments`. A JSX `{/* comment */}` stays on its empty expression. A comment that sits inside a function or object after the last child stays on that container. Rewrite passes walk a Babel-shaped **Path/Scope** facade built on oxc `visitorKeys` (parent pointers, `getBinding`, `replaceWith`). Print is **esrap** with `esrap/languages/tsx` and double quotes.
+
+Babel is not used. oxc-parser JS/JSX matches Acorn ESTree; TS/TSX matches TS-ESTree. Passes must treat:
+
+- `Literal` (not `StringLiteral` / `NumericLiteral`)
+- `Property` (not `ObjectProperty`)
+- `ChainExpression` around optional calls/members
+- `ParenthesizedExpression` (`preserveParens` defaults true) — unwrap in reactive walks, do not require Babel’s implicit paren stripping
+
+Print is esrap, not oxc-codegen or MagicString, so mutations stay on the tree. Acorn / acorn-walk cannot own this pipeline: Acorn does not parse TSX, and acorn-walk has no bindings or JSX/TS visitor keys. Bun.Transpiler and SWC are out of scope (no AST mutation API / not the primary engine).
+
+`derivedLocals` uses the Path/Scope facade; a Rust rewrite of passes is not required while those tests pass.
 
 ## Data flow
 
