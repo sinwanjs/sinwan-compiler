@@ -29,7 +29,7 @@ See [Transform](transform.md) for wrapping rules and options.
 
 ### `autoWrapComponents(ast, filename?)`
 
-Mutates an ESTree AST (oxc-parser): wrap exported component-like functions with `cc(...)`. Returns `true` if anything changed. `transformJSX` already runs this.
+Mutates an ESTree AST (oxc-parser): wrap exported component-like functions (including `function X` / `const X` exported through `export { X }`) with `cc(...)`. Returns `true` if anything changed. `transformJSX` already runs this.
 
 ### `rewriteLiveCcDestructure(ast)`
 

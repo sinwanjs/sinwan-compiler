@@ -206,7 +206,7 @@ function ensureComponentImport(
 ): void {
   let target: t.ImportDeclaration | null = null;
   for (const stmt of ast.program.body) {
-    if (!t.isImportDeclaration(stmt)) continue;
+    if (!t.isImportDeclaration(stmt) || stmt.importKind === "type") continue;
     if (hasLocalSpecifier(stmt, local)) return;
     if (t.moduleSourceValue(stmt.source) === "sinwan/component") {
       target = stmt;

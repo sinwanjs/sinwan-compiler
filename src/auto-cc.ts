@@ -164,6 +164,56 @@ function ccCall(arg: t.Expression, ccName: string): t.CallExpression {
   return t.callExpression(t.identifier(ccName), [arg]);
 }
 
+/** Keeps `<T>` and the return type when a declaration is rebuilt. */
+function withTypes(fn: t.Function, from: t.Function): t.Function {
+  fn.typeParameters = from.typeParameters;
+  fn.returnType = from.returnType;
+  return fn;
+}
+
+/**
+ * `function X` is hoisted, so module code above it may already read `X`
+ * (`Object.assign(X, { Item })`). As `const X = cc(...)` that read would throw.
+ * Reads inside functions, export specifiers and types run later or not at all.
+ */
+function isReadBeforeDeclaration(path: any, name: string): boolean {
+  const start = path.node.start ?? 0;
+  return (path.parentPath.scope.getBinding(name)?.referencePaths ?? []).some(
+    (ref: any) =>
+      (ref.node.start ?? 0) < start &&
+      !ref.getFunctionParent() &&
+      ref.parent?.type !== "ExportSpecifier" &&
+      !ref.findParent((parent: any) => parent.isTSType()),
+  );
+}
+
+/**
+ * Local bindings exported through `export { Local }` / `export { Local as Name }`
+ * (no `from`), mapped to their exported component name. Type-only exports and
+ * non-component export names are skipped.
+ */
+function collectSpecifierExports(ast: t.Node): Map<string, string> {
+  const exports = new Map<string, string>();
+  traverse(ast, {
+    ExportNamedDeclaration(path: any) {
+      const node = path.node;
+      if (node.declaration || node.source || node.exportKind === "type") return;
+      for (const spec of node.specifiers ?? []) {
+        if (!t.isExportSpecifier(spec) || spec.exportKind === "type") continue;
+        if (!t.isIdentifier(spec.local) || !t.isIdentifier(spec.exported)) continue;
+        if (isComponentName(spec.exported.name)) {
+          exports.set(spec.local.name, spec.exported.name);
+        }
+      }
+    },
+  });
+  return exports;
+}
+
+function isTopLevel(path: any): boolean {
+  return path.parent?.type === "Program";
+}
+
 /**
  * Mutates the AST, wrapping exported component-like functions with `cc(...)`.
  * Returns `true` if any wrapping was performed.
@@ -181,6 +231,26 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
     return true;
   };
 
+  /** Wraps each `const Name = <fn>` whose `componentName(Name)` is defined. */
+  const wrapDeclarators = (
+    declarators: any[],
+    componentName: (name: string) => string | undefined,
+  ): void => {
+    for (const dPath of declarators) {
+      const id = dPath.node.id as t.LVal;
+      if (!t.isIdentifier(id)) continue;
+      const name = componentName(id.name);
+      if (name === undefined || !dPath.node.init) continue;
+      const initPath = unwrapFunctionPath(dPath.get("init"));
+      if (!t.isFunction(initPath.node)) continue;
+      if (!wrapIfCandidate(initPath, name)) continue;
+      dPath.node.init = ccCall(initPath.node, ccName ?? "cc");
+      changed = true;
+    }
+  };
+
+  const specifierExports = collectSpecifierExports(ast);
+
   traverse(ast, {
     ExportNamedDeclaration(path: any) {
       const decl = path.node.declaration;
@@ -191,12 +261,15 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
         const name = decl.id.name;
         const fnPath = path.get("declaration");
         if (!wrapIfCandidate(fnPath, name)) return;
-        const fnExpr = t.functionExpression(
-          decl.id,
-          decl.params,
-          decl.body,
-          decl.generator,
-          decl.async,
+        const fnExpr = withTypes(
+          t.functionExpression(
+            decl.id,
+            decl.params,
+            decl.body,
+            decl.generator,
+            decl.async,
+          ),
+          decl,
         );
         const varDecl = t.variableDeclaration("const", [
           t.variableDeclarator(
@@ -211,28 +284,47 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
 
       // export const Foo = <fn>  ->  export const Foo = cc(<fn>)
       if (t.isVariableDeclaration(decl)) {
-        for (const dPath of path.get("declaration.declarations") as any[]) {
-          const id = dPath.node.id as t.LVal;
-          if (!t.isIdentifier(id) || !isComponentName(id.name)) continue;
-          const init = dPath.node.init
-            ? (t.unwrapParens(dPath.node.init as t.Node) as t.Expression)
-            : dPath.node.init;
-          if (!init) continue;
-          let initPath = unwrapFunctionPath(dPath.get("init"));
-          if (
-            t.isCallExpression(initPath.node) &&
-            t.isIdentifier(initPath.node.callee) &&
-            aliases.has(initPath.node.callee.name)
-          ) {
-            continue;
-          }
-          if (!t.isFunction(initPath.node)) continue;
-          if (!wrapIfCandidate(initPath, id.name)) continue;
-          dPath.node.init = ccCall(initPath.node, ccName ?? "cc");
-          changed = true;
-        }
+        wrapDeclarators(path.get("declaration.declarations") as any[], (name) =>
+          isComponentName(name) ? name : undefined,
+        );
         return;
       }
+    },
+
+    // function Foo() {...}; export { Foo }  ->  const Foo = cc(function Foo() {...});
+    FunctionDeclaration(path: any) {
+      const decl = path.node;
+      if (!isTopLevel(path) || !t.isIdentifier(decl.id)) return;
+      const exported = specifierExports.get(decl.id.name);
+      if (exported === undefined || !wrapIfCandidate(path, exported)) return;
+      if (isReadBeforeDeclaration(path, decl.id.name)) return;
+      const fnExpr = withTypes(
+        t.functionExpression(
+          decl.id,
+          decl.params,
+          decl.body,
+          decl.generator,
+          decl.async,
+        ),
+        decl,
+      );
+      path.replaceWith(
+        t.variableDeclaration("const", [
+          t.variableDeclarator(
+            t.identifier(decl.id.name),
+            ccCall(fnExpr, ccName ?? "cc"),
+          ),
+        ]),
+      );
+      changed = true;
+    },
+
+    // const Foo = <fn>; export { Foo }  ->  const Foo = cc(<fn>);
+    VariableDeclaration(path: any) {
+      if (!isTopLevel(path)) return;
+      wrapDeclarators(path.get("declarations") as any[], (name) =>
+        specifierExports.get(name),
+      );
     },
 
     ExportDefaultDeclaration(path: any) {
@@ -246,12 +338,15 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
         const name = decl.id.name;
         const fnPath = path.get("declaration");
         if (!wrapIfCandidate(fnPath, name)) return;
-        const fnDecl = t.functionDeclaration(
-          decl.id,
-          decl.params,
-          decl.body,
-          decl.generator,
-          decl.async,
+        const fnDecl = withTypes(
+          t.functionDeclaration(
+            decl.id,
+            decl.params,
+            decl.body,
+            decl.generator,
+            decl.async,
+          ),
+          decl,
         );
         const exportDefault = t.exportDefaultDeclaration(
           ccCall(t.identifier(name), ccName ?? "cc"),
@@ -265,12 +360,15 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
       if (t.isFunctionDeclaration(decl) && !decl.id) {
         const fnPath = path.get("declaration");
         if (!wrapIfCandidate(fnPath, null)) return;
-        const fnExpr = t.functionExpression(
-          null,
-          decl.params,
-          decl.body,
-          decl.generator,
-          decl.async,
+        const fnExpr = withTypes(
+          t.functionExpression(
+            null,
+            decl.params,
+            decl.body,
+            decl.generator,
+            decl.async,
+          ),
+          decl,
         );
         path.node.declaration = ccCall(fnExpr, ccName ?? "cc");
         changed = true;

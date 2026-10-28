@@ -13,6 +13,7 @@ const files = [
   "reactive-wrap-api.test.ts",
   "transform.test.ts",
   "compiler-1-0-review.test.ts",
+  "auto-cc.test.ts",
 ].map((file) => path.join(testsDir, file));
 
 const result = Bun.spawnSync({

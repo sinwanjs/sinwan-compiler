@@ -32,7 +32,7 @@ Exported functions that look like components are wrapped for you. You can write 
 
 A candidate must be:
 
-- **Exported** (named or default)
+- **Exported** (named or default): `export function`, `export const`, `export default`, or a top-level `function` / `const` exported through `export { X }` or `export { X as Name }` (the exported name must be uppercase)
 - **Uppercase** (or an anonymous `export default function ()`)
 - **0 or 1 parameter**
 - **Returning JSX** in that function (not only in a nested helper)
@@ -50,7 +50,9 @@ export const App = cc(function App() {
 });
 ```
 
-Not wrapped: lowercase helpers, generators, multi-argument functions, or functions that never return JSX. If `cc` is not imported yet, the compiler adds `import { cc } from "sinwan/component"`.
+Not wrapped: lowercase helpers, generators, multi-argument functions, functions that never return JSX, type-only exports, re-exports (`export { X } from "./x"`), components that are not exported, and a `function X` exported through `export { X }` that module code reads before its declaration (for example `const Group = Object.assign(X, { Item })` above it), because turning it into `const X = cc(...)` would make that read throw. Reads inside functions, export specifiers and types do not count. A `cc` parent passes reactive props to child components as getters, so a non-exported component that receives props from one must be wrapped with `cc(...)` explicitly. If `cc` is not imported yet, the compiler adds `import { cc } from "sinwan/component"`.
+
+Type parameters and return types are kept on the wrapped function. A circular import that reads `X` at module load before this file finishes evaluating is not detected; `export function X` has the same limitation.
 
 `cc` may be imported from `sinwan` or `sinwan/component`.
 
@@ -138,7 +140,10 @@ return (
 
 - Only referenced, identifier-named `const` declarations directly in a `cc` setup body (including auto-`cc` components) are candidates. Dependencies are processed in declaration order, including multiple declarators in one statement.
 - Pure read expressions are supported: member/index/optional access, arithmetic, comparisons, boolean/conditional expressions, template strings, object/array literals, and TypeScript expression annotations. Direct imported `useState` getter calls and unshadowed single-argument `Boolean`, `Number`, and `String` coercions are also supported. Property reads and coercions must be free of user-defined side effects.
-- Calls to arbitrary helpers, hooks, factories or methods, assignments, updates, allocations, destructuring, `let`/`var`, mutable captures, and forward/TDZ references remain eager — **unless** the callee is an imported function annotated with `/** @sinwan-pure */` (see [`@sinwan-pure` JSDoc contract](#sinwan-pure-jsdoc-contract) below). Explicit getter and `computed` initializers are unchanged. Module, event-handler, render-callback, loop and nested-block declarations are not promoted.
+- Calls to arbitrary helpers, hooks, factories or methods, assignments, updates, allocations, destructuring, `let`/`var`, mutable captures, and forward/TDZ references remain eager — **unless** the callee is a function annotated with `/** @sinwan-pure */` (imported, or declared in the same file), a local zero-arity arrow getter whose expression body is itself safe (`const yearNow = () => …`, then `props.fromYear ?? yearNow() - 10`), or a built-in read on a known array or `Date` (below). See [`@sinwan-pure` JSDoc contract](#sinwan-pure-jsdoc-contract) below. A getter with a block body, side effects (`() => count++`) or a call back into itself stays eager. Explicit getter and `computed` initializers are unchanged.
+- Built-in reads: `Array.from(...)`, non-mutating array reads (`map`, `filter`, `flatMap`, `flat`, `slice`, `concat`, `join`, `at`, `find`, `findIndex`, `some`, `every`, `reduce`, `includes`, `indexOf`, `entries`, `keys`, `values`) and `Date` getters (`getFullYear`, `getMonth`, `getDate`, `getDay`, `getTime`, `getHours`, `getMinutes`, `getSeconds`, `getMilliseconds`, `valueOf`) promote only on a receiver the compiler knows is an array or `Date`: an array literal, `Array.from(...)`, an array read that returns a new array, a `const` annotated `T[]` / `Array<T>` / `ReadonlyArray<T>` / `Date` or initialized from one of these, or a call to a same-file function with that return type annotation. A callback must be inline (its body is inspected) or a `@sinwan-pure` function; `items.map(track)` with an unannotated `track` stays eager. Reads on other values (`props.items.map(...)`, `props.query.filter(...)`) stay eager because the method may not be the built-in one; annotate a `const` (`const items: Item[] = props.items`) to opt in.
+- A pure method read on a promoted local such as `monthList.map(...)` or `today.getFullYear()` is rewritten to `monthList().map(...)` / `today().getFullYear()`. Mutating reads such as `list.push` and `date.setFullYear` stay snapshots. A promoted local that holds a function is still called: `const close = props.onClose; close()` becomes `close()()`. Module, event-handler, render-callback, loop and nested-block declarations are not promoted.
+- A reactive value passed to a parameter typed `LiveRead<T>` (`T | (() => T)`) is wrapped as `() => value`. An argument that is already a function is left alone. `createLiveState(..., props.selected)` therefore re-reads `props.selected` on each `state.value` access.
 - Bare signal/store containers still pass through unchanged. Bare component prop-bag aliases retain their ordinary JavaScript value semantics. References are resolved by lexical binding, so shadowed locals and object keys are not rewritten.
 - Every ordinary value use is called, including chained initializers, closures, event bodies, shorthand object values and setup `if` tests. A boolean does **not** become an accidentally truthy function. Setup control flow still runs once; use `Show`/`Switch` for reactive branches.
 - Variables used as JSX tag names, in type queries, or as mutation/method-call receivers are left eager. Components containing direct `eval` are excluded.
@@ -170,12 +175,12 @@ export function cn(...inputs: ClassValue[]): string {
 }
 ```
 
-Both `export function` and `export const` declarations are recognized. The annotation must be a block comment (`/** */`) immediately before the `export` keyword.
+Both `export function` and `export const` declarations are recognized. The annotation must be a block comment (`/** */`) immediately before the `export` keyword. A non-exported function in the same file is also recognized when the comment sits directly above `function` or `const`.
 
 **What the compiler guarantees:**
 
 - When `derivedLocals: true` is enabled, calls to `@sinwan-pure`-annotated imported functions are treated as safe expressions. The containing `const` initializer is promoted to a zero-argument getter, and references inside the function arguments are rewritten (e.g. `seamInactive` → `seamInactive()`).
-- The compiler resolves the import path, reads the source file, parses it, and checks for `/** @sinwan-pure */` on exported declarations. Results are cached per resolved file path, so each file is read at most once per compilation process.
+- The compiler resolves the import path, reads the source file, parses it, and checks for `/** @sinwan-pure */` on exported declarations. Results are cached per resolved file path and reused while that file, and any file it re-exports from, keeps its modification time, so a dev server picks up a new or removed annotation without a restart. The same applies to the `LiveRead<T>` parameter scan.
 - All import types are scanned: relative imports (`./`, `../`), bare specifiers (`clsx`, `sinwan/reactivity`), scoped packages (`@scope/utils`), and subpath imports (`@scope/utils/merge`). The compiler walks up the directory tree to find `node_modules/<pkg>`, reads `package.json`, and resolves the entry point via `exports`, `module`, `main`, `source`, or `index` files.
 - If the `resolveImport` callback is provided by the plugin, it is used for path resolution (handles tsconfig paths, bunfig aliases, workspace packages, and Bun/Vite module resolution). Otherwise, the compiler falls back to direct filesystem resolution with common extensions (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.mts`, `.cts`) and `index` files.
 

@@ -2,6 +2,21 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.1.0] — More derived locals, `LiveRead` arguments, and `export { X }` components
+
+### Added
+
+- **Same-file pure helpers and local getters promote (`reactive-wrap.ts`)**: With `derivedLocals`, a call to a same-file `/** @sinwan-pure */` function or const, or to a local zero-arity arrow getter whose body is itself safe (`const yearNow = () => …`), no longer blocks promotion, so `const fromYear = props.fromYear ?? yearNow() - 10` stays live. Getters with side effects (`() => count++`), block bodies or recursion, and unannotated helpers, stay eager.
+- **Array and `Date` reads promote (`reactive-wrap.ts`)**: `Array.from(...)` and non-mutating array reads (`map`, `filter`, `slice`, `join`, …) on a known array, and `Date` getters (`getFullYear`, `getTime`, …) on a known `Date`, are promotable. A receiver is known when it is an array literal, `Array.from(...)`, an array read that returns an array, a `const` annotated or initialized as an array or `Date`, or a call to a same-file function with that return type. Callbacks must be inline or `@sinwan-pure`. Reads on unknown values such as `props.query.filter(...)`, and mutating calls such as `push` and `setFullYear`, stay eager. Pure array reads on a promoted local are rewritten (`monthList.map(...)` → `monthList().map(...)`).
+- **`LiveRead<T>` arguments (`reactive-wrap.ts`)**: A reactive, non-function argument passed to a parameter typed `LiveRead<T>` (`T | (() => T)`) is wrapped as `() => value`, so APIs such as `createLiveState(..., props.selected)` re-read it. Other parameters are unchanged.
+- **Auto-`cc` for `export { X }` (`auto-cc.ts`)**: A top-level `function X` or `const X = <fn>` exported through `export { X }` / `export { X as Name }` is wrapped with `cc(...)` like `export function X`. Before, such a child received a `cc` parent's derived props as getter functions and dropped them (for example `class={cn(...)}` never reached the DOM). Type-only exports, re-exports and lowercase export names are not wrapped, and neither is a `function X` that module code reads before its declaration (`Object.assign(X, { Item })` above it), since a `const` there would throw. Components written this way now run as `cc` components; a non-exported component that receives props from a `cc` parent still needs an explicit `cc(...)`.
+
+### Fixed
+
+- **Live rest helpers are not imported as types (`live-cc-destructure.ts`)**: `createLiveRest` / `getSpreadProps` were added to an existing `import type { … } from "sinwan/component"`, so they were erased and the component threw `ReferenceError: _$createLiveRest is not defined`. They now go into a value import.
+- **Wrapped components keep type parameters (`auto-cc.ts`)**: `export function List<T>(props: Props<T>): JSX.Element` lost `<T>` and the return type when it was rewritten to `cc(function List(...))`. Both are kept now, for every auto-`cc` form.
+- **Pure and `LiveRead` scans follow file edits (`reactive-wrap.ts`)**: The `@sinwan-pure` and `LiveRead<T>` scans of imported files were cached for the life of the process, so a dev server kept the first result after the helper file changed. A cached scan is reused only while the file, and every file it re-exports from, keeps its modification time.
+
 ## [1.0.0] — Oxc Compiler, Nested Hoist, and `sinway` Stores
 
 sinwan-compiler 1.0.0 replaces Babel with oxc-parser and esrap, hoists native elements inside list and conditional expressions, and follows Sinwan 2.0.0’s public entries. Pair with **sinwan 2.0.0**. `transformJSX`, analyze, and the plugin options stay the same.

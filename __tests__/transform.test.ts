@@ -103,6 +103,354 @@ describe("derived local promotion", () => {
     expectFragment(code, "data-sizes={() => list()}");
   });
 
+  it("promotes same-file @sinwan-pure helpers and calls to local getters", () => {
+    const result = transformJSX(
+      `import { cc } from "sinwan/component";
+/** @sinwan-pure */
+function zonedToday(timeZone?: string): string {
+  return timeZone ?? "local";
+}
+function stamp(timeZone?: string): string {
+  return timeZone ?? "local";
+}
+export const Calendar = cc((props: { timeZone?: string; fromYear?: number }) => {
+  const today = zonedToday(props.timeZone);
+  const frozen = stamp(props.timeZone);
+  const yearNow = () => today.length;
+  const fromYear = props.fromYear ?? yearNow() - 10;
+  return <div data-today={today} data-from={fromYear} data-frozen={frozen} />;
+});
+`,
+      "calendar.tsx",
+      { derivedLocals: true, hoist: false },
+    );
+    expectFragment(result.code, "const today = () => zonedToday(");
+    expectFragment(result.code, "const frozen = stamp(");
+    expect(result.code).not.toContain("const frozen = () => stamp(");
+    expectFragment(
+      result.code,
+      "const fromYear = () => props.fromYear ?? yearNow() - 10",
+    );
+    expectFragment(result.code, "data-from={() => fromYear()}");
+    expectFragment(result.code, "data-today={() => today()}");
+    expectFragment(result.code, "const yearNow = () => today().length");
+    expect(result.code).not.toContain("today()()");
+  });
+
+  it("wraps reactive values passed to LiveRead parameters", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+type LiveRead<T> = T | (() => T);
+function createLiveState<T>(controlled: boolean, fallback: T, read: LiveRead<T>) {
+  return read;
+}
+function take(value: string) {
+  return value;
+}
+function optionalRead<T>(read: LiveRead<T> | undefined) {
+  return read;
+}
+function withDefault(read: LiveRead<string> = "none") {
+  return read;
+}
+export const App = cc((props: { selected?: string; month?: string }) => {
+  const selected = createLiveState(true, undefined, props.selected);
+  const kept = createLiveState(true, undefined, () => props.selected);
+  const plain = createLiveState(true, undefined, "static");
+  const month = createLiveState(true, "m", props.month ?? "now");
+  optionalRead(props.month);
+  withDefault(props.month);
+  take(props.selected ?? "");
+  return <div />;
+});
+`,
+      "calendar.tsx",
+      { derivedLocals: true, hoist: false },
+    ).code;
+    expectFragment(code, "createLiveState(true, undefined, () => props.selected)");
+    expectFragment(code, "createLiveState(true, undefined, () => props.selected)");
+    expectFragment(code, 'createLiveState(true, undefined, "static")');
+    expectFragment(code, 'createLiveState(true, "m", () => props.month ?? "now")');
+    expectFragment(code, "optionalRead(() => props.month)");
+    expectFragment(code, "withDefault(() => props.month)");
+    expectFragment(code, "take(props.selected ?? \"\")");
+    expect(code).not.toContain("() => () => props.selected");
+  });
+
+  it("wraps LiveRead arguments of an imported helper", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-liveread-"));
+    fs.writeFileSync(
+      path.join(tmpDir, "live-state.ts"),
+      `export type LiveRead<T> = T | (() => T);
+export function createLiveState<T>(controlled: boolean, fallback: T, read: LiveRead<T>) {
+  return read;
+}
+`,
+    );
+    const componentPath = path.join(tmpDir, "calendar.tsx");
+    fs.writeFileSync(
+      componentPath,
+      `import { cc } from "sinwan/component";
+import { createLiveState } from "./live-state";
+export const Calendar = cc((props: { selected?: string }) => {
+  const selected = createLiveState(true, undefined, props.selected);
+  return <div data-s={selected} />;
+});
+`,
+    );
+    try {
+      const code = transformJSX(
+        fs.readFileSync(componentPath, "utf-8"),
+        componentPath,
+        { derivedLocals: true, hoist: false },
+      ).code;
+      expectFragment(
+        code,
+        "createLiveState(true, undefined, () => props.selected)",
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("promotes Array.from and array map reads that touch reactive values", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+/** @sinwan-pure */
+function addMonths(date: number, index: number, calendar: string) {
+  return date + index;
+}
+export const App = cc((props: { n?: number; calendar?: string }) => {
+  const viewMonth = signal(0);
+  const numberOfMonths = props.n ?? 1;
+  const calendar = props.calendar ?? "gregory";
+  const monthList = Array.from({ length: numberOfMonths }, (_, index) =>
+    addMonths(viewMonth.value, index, calendar),
+  );
+  const names = [viewMonth.value].map((value) => value + numberOfMonths);
+  const pushed = [viewMonth.value];
+  pushed.push(1);
+  return <div>{monthList.map((month) => month)}{names}{pushed}</div>;
+});
+`,
+      "calendar.tsx",
+      { derivedLocals: true, hoist: false },
+    ).code;
+    expectFragment(code, "const monthList = () => Array.from(");
+    expectFragment(code, "monthList().map((month) => month)");
+    expectFragment(code, "const names = () => [viewMonth.value].map(");
+    expectFragment(code, "const pushed = [viewMonth.value];");
+    expect(code).not.toContain("pushed().push");
+  });
+
+  it("promotes pure date reads and leaves setters as snapshots", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+import { signal } from "sinwan/reactivity";
+/** @sinwan-pure */
+function isGregory(calendar: string) { return calendar === "gregory"; }
+/** @sinwan-pure */
+function parts(date: Date, calendar: string) { return { year: date.getFullYear() }; }
+/** @sinwan-pure */
+function zonedToday(timeZone?: string): Date { return new Date(timeZone ?? "local"); }
+export const App = cc((props: { calendar?: string; timeZone?: string; fromYear?: number }) => {
+  const calendar = props.calendar ?? "gregory";
+  const today = zonedToday(props.timeZone);
+  const yearNow = isGregory(calendar)
+    ? today.getFullYear()
+    : parts(today, calendar).year;
+  const fromYear = props.fromYear ?? yearNow - 10;
+  const edited = signal(new Date()).value;
+  edited.setFullYear(2000);
+  return <div data-y={yearNow} data-f={fromYear} />;
+});
+`,
+      "calendar.tsx",
+      { derivedLocals: true, hoist: false },
+    ).code;
+    expectFragment(code, "const today = () => zonedToday(");
+    expectFragment(
+      code,
+      "const yearNow = () => isGregory(calendar()) ? today().getFullYear() : parts(today(), calendar()).year",
+    );
+    expectFragment(code, "const fromYear = () => props.fromYear ?? yearNow() - 10");
+    expectFragment(code, "const edited = signal(new Date()).value;");
+    expect(code).not.toContain("edited().setFullYear");
+  });
+
+  it("promotes a same-file @sinwan-pure const helper", () => {
+    const result = transformJSX(
+      `import { cc } from "sinwan/component";
+/** @sinwan-pure */
+const zonedToday = (timeZone?: string): string => timeZone ?? "local";
+export const Calendar = cc((props: { timeZone?: string }) => {
+  const today = zonedToday(props.timeZone);
+  return <div data-today={today} />;
+});
+`,
+      "calendar.tsx",
+      { derivedLocals: true, hoist: false },
+    );
+    expectFragment(result.code, "const today = () => zonedToday(");
+    expectFragment(result.code, "data-today={() => today()}");
+  });
+
+  it("promotes a same-file exported @sinwan-pure const helper", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+/** @sinwan-pure */
+export const label = (value?: string): string => value ?? "none";
+export const Badge = cc((props: { value?: string }) => {
+  const text = label(props.value);
+  return <span>{text}</span>;
+});
+`,
+      "badge.tsx",
+      { derivedLocals: true, hoist: false },
+    ).code;
+    expectFragment(code, "const text = () => label(props.value)");
+  });
+
+  it("still calls a promoted prop alias that holds a function", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+export const Picker = cc((props: { onPick: () => void }) => {
+  const pick = props.onPick;
+  return <button onClick={() => pick()} />;
+});
+`,
+      "picker.tsx",
+      { derivedLocals: true, hoist: false },
+    ).code;
+    expectFragment(code, "const pick = () => props.onPick");
+    expectFragment(code, "pick()()");
+  });
+
+  it("promotes calls to local getters only when the getter body is safe", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+let count = 0;
+/** @sinwan-pure */
+const now = () => Date.now();
+export const App = cc((props: { x?: number }) => {
+  const bump = () => count++;
+  const block = () => {
+    return props.x;
+  };
+  const loop = () => loop();
+  const read = () => props.x;
+  const bumped = props.x ?? bump();
+  const blocked = props.x ?? block();
+  const looped = props.x ?? loop();
+  const viaGetter = read() ?? 1;
+  const stamped = props.x ?? now();
+  return <div data-a={bumped} data-b={blocked} data-c={looped} data-d={viaGetter} data-e={stamped} />;
+});
+`,
+      "getters.tsx",
+      { derivedLocals: true, hoist: false },
+    ).code;
+    expectFragment(code, "const bumped = props.x ?? bump()");
+    expectFragment(code, "const blocked = props.x ?? block()");
+    expectFragment(code, "const looped = props.x ?? loop()");
+    expectFragment(code, "const viaGetter = () => read() ?? 1");
+    expectFragment(code, "const stamped = () => props.x ?? now()");
+  });
+
+  it("promotes array reads only on known arrays with safe callbacks", () => {
+    const code = transformJSX(
+      `import { cc } from "sinwan/component";
+/** @sinwan-pure */
+function double(value: number) { return value * 2; }
+/** @sinwan-pure */
+function range(n: number): number[] { return [n]; }
+function track(value: number) { console.log(value); return value; }
+type Query = { filter(fn: (value: number) => boolean): Query };
+export const App = cc((props: { items: number[]; query: Query; n: number }) => {
+  const viaPure = [props.n].map(double);
+  const viaTrack = [props.n].map(track);
+  const fromProps = props.items.map((value) => value);
+  const filtered = props.query.filter((value) => value > 0);
+  const typed: number[] = props.items;
+  const chained = typed.filter((value) => value > props.n).slice(0);
+  const readonly: ReadonlyArray<number> = props.items;
+  const viaReadonly = readonly.map((value) => value);
+  const qualified: Lib.List = props.items;
+  const viaQualified = qualified.map((value) => value);
+  const viaHelper = range(props.n).map((value) => value);
+  const missing = [props.n].map();
+  const fromTracked = Array.from([props.n], track);
+  const joined = [props.n].join(",");
+  const notDate = [props.n].getTime();
+  const fromGlobal = globalList.map((value) => value + props.n);
+  const fromAt = [[props.n]].at(0).map((value) => value);
+  const fromUnknown = makeList(props.n).map((value) => value);
+  return <div>{viaPure}{viaTrack}{fromProps}{filtered}{chained}{viaReadonly}{viaQualified}{viaHelper}{missing}{fromTracked}{joined}{notDate}{fromGlobal}{fromAt}{fromUnknown}</div>;
+});
+`,
+      "arrays.tsx",
+      { derivedLocals: true, hoist: false },
+    ).code;
+    expectFragment(code, "const viaPure = () => [props.n].map(double)");
+    expectFragment(code, "const viaTrack = [props.n].map(track)");
+    expectFragment(code, "const fromProps = props.items.map(");
+    expectFragment(code, "const filtered = props.query.filter(");
+    expectFragment(code, "const chained = () => typed().filter(");
+    expectFragment(code, "const viaReadonly = () => readonly().map(");
+    expectFragment(code, "const viaQualified = qualified().map(");
+    expectFragment(code, "const viaHelper = () => range(props.n).map(");
+    expectFragment(code, "const missing = [props.n].map()");
+    expectFragment(code, "const fromTracked = Array.from([props.n], track)");
+    expectFragment(code, 'const joined = () => [props.n].join(",")');
+    expectFragment(code, "const notDate = [props.n].getTime()");
+    expectFragment(code, "const fromGlobal = globalList.map(");
+    expectFragment(code, "const fromAt = [[props.n]].at(0).map(");
+    expectFragment(code, "const fromUnknown = makeList(props.n).map(");
+  });
+
+  it("re-reads @sinwan-pure imports after the helper file changes", () => {
+    const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-stale-"));
+    const helperPath = path.join(tmpDir, "helper.ts");
+    const barrelPath = path.join(tmpDir, "index.ts");
+    const componentPath = path.join(tmpDir, "view.tsx");
+    const source = `import { cc } from "sinwan/component";
+import { label, createLiveState } from "./index";
+export const View = cc((props: { value?: string }) => {
+  const text = label(props.value);
+  const live = createLiveState(props.value);
+  return <span data-live={live}>{text}</span>;
+});
+`;
+    const writeHelper = (pure: boolean, mtime: number) => {
+      fs.writeFileSync(
+        helperPath,
+        `export type LiveRead<T> = T | (() => T);
+${pure ? "/** @sinwan-pure */\n" : ""}export function label(value?: string) { return value ?? ""; }
+export function createLiveState<T>(read: ${pure ? "LiveRead<T>" : "T"}) { return read; }
+`,
+      );
+      fs.utimesSync(helperPath, mtime, mtime);
+    };
+    fs.writeFileSync(barrelPath, `export { label, createLiveState } from "./helper";\n`);
+    fs.writeFileSync(componentPath, source);
+    try {
+      const compileView = () =>
+        transformJSX(source, componentPath, { derivedLocals: true, hoist: false })
+          .code;
+      writeHelper(false, 1_000);
+      const before = compileView();
+      expectFragment(before, "const text = label(props.value)");
+      expectFragment(before, "createLiveState(props.value)");
+      writeHelper(true, 2_000);
+      const after = compileView();
+      expectFragment(after, "const text = () => label(props.value)");
+      expectFragment(after, "createLiveState(() => props.value)");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
   it("promotes calls to @sinwan-pure JSDoc-annotated imported functions", () => {
     const tmpDir = fs.mkdtempSync(path.join(import.meta.dir, "tmp-pure-"));
     const utilsPath = path.join(tmpDir, "utils.ts");
@@ -1470,7 +1818,7 @@ export const App = cc(() => {
       "picked = panels.value[index]",
       "typed = () => source.value",
       "list = source.value",
-      "called = local()",
+      "called = () => local()",
       "method = api.read()",
       "bool = Boolean(...args)",
       "unused = source.value",

@@ -187,7 +187,48 @@ interface PureImports {
   member: Set<string>;
 }
 
-const pureImportCache = new Map<string, Map<string, PureExportKind>>();
+/** A per-file scan, valid while every file it read keeps its modification time. */
+interface FileScan<T> {
+  value: T;
+  stamps: Map<string, number>;
+}
+
+function fileStamp(file: string): number {
+  return fs.statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? -1;
+}
+
+/** The cached scan of `file`, unless it or a file it re-exports from changed. */
+function freshScan<T>(
+  cache: Map<string, FileScan<T>>,
+  file: string,
+): FileScan<T> | undefined {
+  const entry = cache.get(file);
+  if (!entry) return undefined;
+  for (const [stamped, mtime] of entry.stamps) {
+    if (fileStamp(stamped) !== mtime) return undefined;
+  }
+  return entry;
+}
+
+function mergeStamps(into: Map<string, number>, from: Map<string, number>): void {
+  for (const [file, mtime] of from) into.set(file, mtime);
+}
+
+const pureImportCache = new Map<string, FileScan<Map<string, PureExportKind>>>();
+
+function pureExportsOf(
+  filePath: string,
+  resolveImport?:
+    | ((source: string, fromFile: string) => string | null)
+    | undefined,
+  depth = 0,
+): FileScan<Map<string, PureExportKind>> {
+  const cached = freshScan(pureImportCache, filePath);
+  if (cached) return cached;
+  const scan = scanPureExports(filePath, resolveImport, depth);
+  pureImportCache.set(filePath, scan);
+  return scan;
+}
 const PURE_EXTENSIONS = [
   ".ts",
   ".tsx",
@@ -366,14 +407,15 @@ function scanPureExports(
     | ((source: string, fromFile: string) => string | null)
     | undefined,
   depth = 0,
-): Map<string, PureExportKind> {
+): FileScan<Map<string, PureExportKind>> {
   const pure = new Map<string, PureExportKind>();
-  if (depth > 10) return pure; // prevent infinite re-export cycles
+  const scan = { value: pure, stamps: new Map([[filePath, fileStamp(filePath)]]) };
+  if (depth > 10) return scan; // prevent infinite re-export cycles
   let code: string;
   try {
     code = fs.readFileSync(filePath, "utf-8");
   } catch {
-    return pure;
+    return scan;
   }
   let ast: t.Node;
   try {
@@ -383,7 +425,7 @@ function scanPureExports(
       sourceFilename: filePath,
     });
   } catch {
-    return pure;
+    return scan;
   }
   const hasPureJSDoc = (node: any): boolean =>
     node?.leadingComments?.some(
@@ -427,11 +469,9 @@ function scanPureExports(
       if (source && p.node.specifiers) {
         const resolved = resolveAnyImport(source, filePath, resolveImport);
         if (resolved) {
-          let reExportPure = pureImportCache.get(resolved);
-          if (!reExportPure) {
-            reExportPure = scanPureExports(resolved, resolveImport, depth + 1);
-            pureImportCache.set(resolved, reExportPure);
-          }
+          const nested = pureExportsOf(resolved, resolveImport, depth + 1);
+          mergeStamps(scan.stamps, nested.stamps);
+          const reExportPure = nested.value;
           for (const spec of p.node.specifiers ?? []) {
             if (!t.isExportSpecifier(spec)) continue;
             const exported = t.isIdentifier(spec.exported)
@@ -471,11 +511,9 @@ function scanPureExports(
       if (!source) return;
       const resolved = resolveAnyImport(source, filePath, resolveImport);
       if (!resolved) return;
-      let reExportPure = pureImportCache.get(resolved);
-      if (!reExportPure) {
-        reExportPure = scanPureExports(resolved, resolveImport, depth + 1);
-        pureImportCache.set(resolved, reExportPure);
-      }
+      const nested = pureExportsOf(resolved, resolveImport, depth + 1);
+      mergeStamps(scan.stamps, nested.stamps);
+      const reExportPure = nested.value;
       for (const [name, kind] of reExportPure) {
         if (name !== "default") {
           pure.set(name, kind);
@@ -483,7 +521,7 @@ function scanPureExports(
       }
     },
   });
-  return pure;
+  return scan;
 }
 
 function collectPureImports(
@@ -512,11 +550,7 @@ function collectPureImports(
         resolveImport,
       );
       if (!resolved) return;
-      let filePure = pureImportCache.get(resolved);
-      if (!filePure) {
-        filePure = scanPureExports(resolved, resolveImport);
-        pureImportCache.set(resolved, filePure);
-      }
+      const filePure = pureExportsOf(resolved, resolveImport).value;
       for (const spec of p.node.specifiers ?? []) {
         if (t.isImportSpecifier(spec)) {
           // Named import: import { cn } from "./utils"
@@ -1911,9 +1945,20 @@ function isTypePosition(ref: NodePath): boolean {
   return ref.findParent((parent) => parent.isTSType()) != null;
 }
 
+function hasPureJSDoc(node: t.Node | null | undefined): boolean {
+  return (
+    node?.leadingComments?.some(
+      (comment) =>
+        comment.type === "CommentBlock" &&
+        comment.value.includes("@sinwan-pure"),
+    ) ?? false
+  );
+}
+
 function canRewriteDerivedReference(ref: NodePath): boolean {
   if (!ref.isIdentifier() || !ref.isReferencedIdentifier()) return false;
   if (isTypePosition(ref)) return true;
+  if (isPureArrayReadReceiver(ref)) return true;
   let target: NodePath = ref;
   while (
     ((target.parentPath?.isMemberExpression() ||
@@ -1941,16 +1986,292 @@ function canRewriteDerivedReference(ref: NodePath): boolean {
   );
 }
 
-function isPureDerivedCall(
+/** Array reads that return a new array, so their result is a known array too. */
+const ARRAY_RESULT_READS = new Set(["map", "filter", "flatMap", "flat", "slice", "concat"]);
+
+/** Array reads whose first argument is a callback the array calls. */
+const CALLBACK_ARRAY_READS = new Set([
+  "map",
+  "filter",
+  "flatMap",
+  "find",
+  "findIndex",
+  "some",
+  "every",
+  "reduce",
+]);
+
+/** Non-mutating array reads. `list.push` stays a snapshot; `list.map` can re-read. */
+const PURE_ARRAY_READS = new Set([
+  ...ARRAY_RESULT_READS,
+  ...CALLBACK_ARRAY_READS,
+  "join",
+  "at",
+  "includes",
+  "indexOf",
+  "entries",
+  "keys",
+  "values",
+]);
+
+/** Non-mutating `Date` reads. `setFullYear` stays a snapshot. */
+const DATE_READS = new Set([
+  "getFullYear",
+  "getMonth",
+  "getDate",
+  "getDay",
+  "getTime",
+  "getHours",
+  "getMinutes",
+  "getSeconds",
+  "getMilliseconds",
+  "valueOf",
+]);
+
+/** Reads that do not mutate the receiver. */
+const PURE_METHOD_READS = new Set([...PURE_ARRAY_READS, ...DATE_READS]);
+
+type BuiltinKind = "array" | "date";
+
+function builtinKindOfType(node: t.Node | null | undefined): BuiltinKind | null {
+  const typeNode = unwrapTypeNode(node);
+  if (typeNode?.type === "TSArrayType") return "array";
+  if (typeNode?.type !== "TSTypeReference") return null;
+  const name = (typeNode as { typeName?: t.Node }).typeName;
+  if (!t.isIdentifier(name)) return null;
+  if (name.name === "Array" || name.name === "ReadonlyArray") return "array";
+  return name.name === "Date" ? "date" : null;
+}
+
+function isGlobalArrayFrom(callee: t.Node, scope: NodePath["scope"]): boolean {
+  return (
+    t.isMemberExpression(callee) &&
+    !callee.computed &&
+    t.isIdentifier(callee.object, { name: "Array" }) &&
+    t.isIdentifier(callee.property, { name: "from" }) &&
+    !scope.getBinding("Array")
+  );
+}
+
+/**
+ * Whether `node` is known to be a built-in array or `Date`: an array literal,
+ * `Array.from(...)`, an array read that returns a new array, a `const` typed or
+ * initialized as one, or a call to a same-file function with that return type.
+ * Anything else (props, imports, arbitrary objects) is unknown.
+ */
+function builtinKindOf(
+  node: t.Node,
+  scope: NodePath["scope"],
+  seen: Set<t.Node> = new Set(),
+): BuiltinKind | null {
+  const expr = t.unwrapParens(node);
+  if (expr.type === "ArrayExpression") return "array";
+  if (t.isCallExpression(expr)) {
+    const callee = t.unwrapParens(expr.callee as t.Node);
+    if (isGlobalArrayFrom(callee, scope)) return "array";
+    if (t.isMemberExpression(callee)) {
+      return !callee.computed &&
+        t.isIdentifier(callee.property) &&
+        ARRAY_RESULT_READS.has(callee.property.name) &&
+        builtinKindOf(callee.object as t.Node, scope, seen) === "array"
+        ? "array"
+        : null;
+    }
+    const fn = t.isIdentifier(callee) ? scope.getBinding(callee.name)?.path : undefined;
+    const declared = fn?.isVariableDeclarator() ? fn.node.init : fn?.node;
+    return functionParamCount(declared) === null
+      ? null
+      : builtinKindOfType(declared?.returnType);
+  }
+  if (!t.isIdentifier(expr)) return null;
+  const binding = scope.getBinding(expr.name);
+  if (
+    !binding ||
+    binding.kind !== "const" ||
+    !binding.path.isVariableDeclarator() ||
+    seen.has(binding.path.node)
+  ) {
+    return null;
+  }
+  seen.add(binding.path.node);
+  const declarator = binding.path.node;
+  return (
+    builtinKindOfType(declarator.id?.typeAnnotation) ??
+    (declarator.init ? builtinKindOf(declarator.init, binding.path.scope, seen) : null)
+  );
+}
+
+function functionParamCount(node: t.Node | null | undefined): number | null {
+  if (
+    !node ||
+    (!t.isFunctionDeclaration(node) &&
+      !t.isFunctionExpression(node) &&
+      !t.isArrowFunctionExpression(node))
+  ) {
+    return null;
+  }
+  return node.params.length;
+}
+
+function isPureArrayReadReceiver(ref: NodePath): boolean {
+  const member = ref.parentPath;
+  if (
+    !member ||
+    (!member.isMemberExpression() && !member.isOptionalMemberExpression()) ||
+    ref.key !== "object" ||
+    member.node.computed ||
+    !t.isIdentifier(member.node.property) ||
+    !PURE_METHOD_READS.has(member.node.property.name)
+  ) {
+    return false;
+  }
+  const call = member.parentPath;
+  return (
+    !!call &&
+    (call.isCallExpression() || call.isOptionalCallExpression()) &&
+    member.key === "callee"
+  );
+}
+
+interface DerivedSafetyContext {
+  scope: ReactiveScope;
+  names: ImportNames;
+  derived: Map<AstBinding, DerivedLocal>;
+  pureImports: PureImports;
+  /** Inline callbacks of a known array read. Their bodies are inspected. */
+  callbacks: Set<t.Node>;
+  /** Local getters being inspected, so recursive getters stay eager. */
+  visiting: Set<t.Node>;
+}
+
+interface DerivedSafety {
+  safe: boolean;
+  reactive: boolean;
+}
+
+function callParts(path: NodePath): { callee: t.Node; args: t.Node[] } {
+  const call = t.unwrapCall(path.node) as { callee: t.Node; arguments?: t.Node[] };
+  return { callee: t.unwrapParens(call.callee), args: call.arguments ?? [] };
+}
+
+/** A same-file function annotated `/** @sinwan-pure *\/`, directly or on its `export`. */
+function isSameFilePureFunction(binding: AstBinding): boolean {
+  const owner = binding.path.parentPath?.node;
+  if (binding.path.isFunctionDeclaration()) {
+    return (
+      hasPureJSDoc(binding.path.node) ||
+      (owner?.type === "ExportNamedDeclaration" && hasPureJSDoc(owner))
+    );
+  }
+  if (!binding.path.isVariableDeclarator()) return false;
+  const declarator = binding.path.node;
+  const exported = binding.path.parentPath?.parentPath?.node;
+  return (
+    functionParamCount(declarator.init) != null &&
+    (hasPureJSDoc(declarator) ||
+      hasPureJSDoc(declarator.init) ||
+      hasPureJSDoc(owner) ||
+      (exported?.type === "ExportNamedDeclaration" && hasPureJSDoc(exported)))
+  );
+}
+
+/** A same-file or imported `@sinwan-pure` function referenced by name. */
+function isPureFunctionReference(
+  node: t.Node | undefined,
   path: NodePath,
-  names: ImportNames,
   pureImports: PureImports,
 ): boolean {
-  if (!path.isCallExpression() && !path.isOptionalCallExpression())
+  if (!t.isIdentifier(node)) return false;
+  const binding = path.scope.getBinding(node.name);
+  if (!binding) return false;
+  return (
+    isSameFilePureFunction(binding) ||
+    ((binding.path.isImportSpecifier() ||
+      binding.path.isImportDefaultSpecifier()) &&
+      pureImports.direct.has(node.name))
+  );
+}
+
+/**
+ * An array read's callback is safe inline, where its body is inspected, or as
+ * a reference to a `@sinwan-pure` function. Any other function may have side
+ * effects that would re-run on every read.
+ */
+function acceptCallback(
+  arg: t.Node | undefined,
+  path: NodePath,
+  ctx: DerivedSafetyContext,
+): boolean {
+  if (t.isArrowFunctionExpression(arg) || t.isFunctionExpression(arg)) {
+    ctx.callbacks.add(arg);
+    return true;
+  }
+  return isPureFunctionReference(arg, path, ctx.pureImports);
+}
+
+/**
+ * `Array.from(...)`, a non-mutating read on a known array, or a `Date` getter
+ * on a known `Date`. A method name alone is not enough: `query.filter(...)` on
+ * an unknown object may mutate it.
+ */
+function isBuiltinReadCall(
+  path: NodePath,
+  callee: t.Node,
+  args: t.Node[],
+  ctx: DerivedSafetyContext,
+): boolean {
+  if (isGlobalArrayFrom(callee, path.scope)) {
+    return args.length < 2 || acceptCallback(args[1], path, ctx);
+  }
+  if (!t.isMemberExpression(callee) || callee.computed || !t.isIdentifier(callee.property)) {
     return false;
-  const call = t.unwrapCall(path.node);
-  const callee = t.unwrapParens((call as { callee: t.Node }).callee);
-  const args = (call as { arguments?: unknown[] }).arguments ?? [];
+  }
+  const method = callee.property.name;
+  const kind = builtinKindOf(callee.object as t.Node, path.scope);
+  if (kind === "date") return DATE_READS.has(method);
+  if (kind !== "array" || !PURE_ARRAY_READS.has(method)) return false;
+  return !CALLBACK_ARRAY_READS.has(method) || acceptCallback(args[0], path, ctx);
+}
+
+/**
+ * `yearNow()` where `const yearNow = () => expr` is a local zero-arity getter.
+ * The call is as safe, and as reactive, as `expr`. Returns `null` when the
+ * callee is not such a getter.
+ */
+function inspectLocalGetterCall(
+  path: NodePath,
+  ctx: DerivedSafetyContext,
+): DerivedSafety | null {
+  const { callee, args } = callParts(path);
+  if (args.length !== 0 || !t.isIdentifier(callee)) return null;
+  const binding = path.scope.getBinding(callee.name);
+  if (!binding?.path.isVariableDeclarator() || isSameFilePureFunction(binding)) {
+    return null;
+  }
+  const declarator = binding.path;
+  const getter = declarator.node.init;
+  if (functionParamCount(getter) !== 0) return null;
+  if (
+    !t.isArrowFunctionExpression(getter) ||
+    getter.async ||
+    t.isBlockStatement(getter.body) ||
+    ctx.visiting.has(getter)
+  ) {
+    return { safe: false, reactive: false };
+  }
+  ctx.visiting.add(getter);
+  const result = inspectDerivedExpression(
+    singlePath(declarator.get("init.body")),
+    declarator.node.start ?? Infinity,
+    ctx,
+  );
+  ctx.visiting.delete(getter);
+  return result;
+}
+
+function isPureDerivedCall(path: NodePath, ctx: DerivedSafetyContext): boolean {
+  const { callee, args } = callParts(path);
+  if (isBuiltinReadCall(path, callee, args, ctx)) return true;
 
   // Member expression calls: Utils.merge(...), ns.cn(...), ns.Utils.merge(...)
   if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
@@ -1981,14 +2302,14 @@ function isPureDerivedCall(
     const root = node.name;
 
     // Class/object member call: Utils.merge(...) where Utils is a pure import
-    if (pureImports.member.has(root)) {
+    if (ctx.pureImports.member.has(root)) {
       return true;
     }
     // Namespace call: ns.cn(...) or ns.Utils.merge(...)
     // If ANY property in the chain is in the pure set, the call is pure.
     // - ns.cn() → cn is a pure function → pure call
     // - ns.Utils.merge() → Utils is a pure class → any static method is pure
-    const nsMembers = pureImports.namespace.get(root);
+    const nsMembers = ctx.pureImports.namespace.get(root);
     if (nsMembers && props.some((p) => nsMembers.has(p))) {
       return true;
     }
@@ -2003,15 +2324,9 @@ function isPureDerivedCall(
       args.length === 1
     );
   }
-  // @sinwan-pure JSDoc-annotated imported functions (named or default) are
-  // treated as pure calls. Argument count is not restricted.
-  if (
-    (binding.path.isImportSpecifier() ||
-      binding.path.isImportDefaultSpecifier()) &&
-    pureImports.direct.has(callee.name)
-  ) {
-    return true;
-  }
+  // Same-file and imported `/** @sinwan-pure */` helpers. Argument count is
+  // not restricted.
+  if (isPureFunctionReference(callee, path, ctx.pureImports)) return true;
   if (args.length !== 0 || !binding.path.isVariableDeclarator())
     return false;
   const { id, init } = binding.path.node;
@@ -2020,22 +2335,18 @@ function isPureDerivedCall(
     id.elements[0] === binding.identifier &&
     t.isCallExpression(init) &&
     t.isIdentifier(init.callee) &&
-    names.useState.has(init.callee.name) &&
+    ctx.names.useState.has(init.callee.name) &&
     binding.path.scope
       .getBinding(init.callee.name)
       ?.path.isImportSpecifier() === true
   );
 }
 
-function isDerivedInitializer(
-  declaration: NodePath<t.VariableDeclarator>,
-  scope: ReactiveScope,
-  names: ImportNames,
-  derived: Map<AstBinding, DerivedLocal>,
-  pureImports: PureImports,
-): boolean {
-  const init = singlePath(declaration.get("init"));
-  init.assertExpression();
+function inspectDerivedExpression(
+  root: NodePath,
+  before: number,
+  ctx: DerivedSafetyContext,
+): DerivedSafety {
   let safe = true;
   let reactive = false;
   const inspect = (path: NodePath): void => {
@@ -2052,19 +2363,29 @@ function isDerivedInitializer(
           binding.kind === "let" ||
           binding.kind === "var" ||
           (binding.path.isVariableDeclarator() &&
-            (binding.path.node.start ?? -1) >=
-              (declaration.node.start ?? Infinity)))
+            (binding.path.node.start ?? -1) >= before))
       ) {
         safe = false;
         return;
       }
-      if (binding && derived.has(binding)) reactive = true;
-      if (isReactiveRead(node, scope)) reactive = true;
+      if (binding && ctx.derived.has(binding)) reactive = true;
+      if (isReactiveRead(node, ctx.scope)) reactive = true;
     } else if (path.isMemberExpression() || path.isOptionalMemberExpression()) {
-      if (isReactiveRead(node, scope)) reactive = true;
+      if (isReactiveRead(node, ctx.scope)) reactive = true;
     } else if (path.isCallExpression() || path.isOptionalCallExpression()) {
-      if (!isPureDerivedCall(path, names, pureImports)) safe = false;
-      if (isGetterCall(path.node, scope)) reactive = true;
+      const getter = inspectLocalGetterCall(path, ctx);
+      if (getter) {
+        if (!getter.safe) safe = false;
+        if (getter.reactive) reactive = true;
+      } else if (!isPureDerivedCall(path, ctx)) {
+        safe = false;
+      }
+      if (isGetterCall(path.node, ctx.scope)) reactive = true;
+    } else if (
+      (path.isArrowFunctionExpression() || path.isFunctionExpression()) &&
+      ctx.callbacks.has(path.node)
+    ) {
+      // Callback of a known array read. Its body is inspected.
     } else if (path.isSpreadElement()) {
       // Spread elements inside object/array literals are safe only if the
       // spread argument itself is a safe expression; the traverse will
@@ -2093,8 +2414,32 @@ function isDerivedInitializer(
       safe = false;
     }
   };
-  inspect(init);
-  if (safe) init.traverse({ enter: inspect });
+  inspect(root);
+  if (safe) root.traverse({ enter: inspect });
+  return { safe, reactive };
+}
+
+function isDerivedInitializer(
+  declaration: NodePath<t.VariableDeclarator>,
+  scope: ReactiveScope,
+  names: ImportNames,
+  derived: Map<AstBinding, DerivedLocal>,
+  pureImports: PureImports,
+): boolean {
+  const init = singlePath(declaration.get("init"));
+  init.assertExpression();
+  const { safe, reactive } = inspectDerivedExpression(
+    init,
+    declaration.node.start ?? Infinity,
+    {
+      scope,
+      names,
+      derived,
+      pureImports,
+      callbacks: new Set(),
+      visiting: new Set(),
+    },
+  );
   return safe && reactive;
 }
 
@@ -2235,6 +2580,214 @@ function promoteReactiveConstInitializers(
   });
 }
 
+const readerParamCache = new Map<string, FileScan<Map<string, number[]>>>();
+
+function unwrapTypeNode(node: t.Node | null | undefined): t.Node | null {
+  if (!node) return null;
+  if (node.type === "TSTypeAnnotation" || node.type === "TSParenthesizedType") {
+    return unwrapTypeNode(
+      (node as { typeAnnotation?: t.Node }).typeAnnotation ?? null,
+    );
+  }
+  return node;
+}
+
+/** `LiveRead<T>` marks a parameter that re-reads its argument from a getter. */
+function typeReferencesLiveRead(node: t.Node | null | undefined): boolean {
+  const typeNode = unwrapTypeNode(node);
+  if (!typeNode) return false;
+  if (typeNode.type === "TSTypeReference") {
+    const name = (typeNode as { typeName?: t.Node }).typeName;
+    return t.isIdentifier(name) && name.name === "LiveRead";
+  }
+  if (typeNode.type === "TSUnionType" || typeNode.type === "TSIntersectionType") {
+    const types = (typeNode as { types?: t.Node[] }).types ?? [];
+    return types.some((part) => typeReferencesLiveRead(part));
+  }
+  return false;
+}
+
+function readerParamIndexes(params: readonly t.Node[] | undefined): number[] {
+  const indexes: number[] = [];
+  for (const [index, param] of (params ?? []).entries()) {
+    if (!param || param.type === "RestElement") continue;
+    const annotated =
+      param.type === "AssignmentPattern"
+        ? (param as { left?: t.Node }).left
+        : param;
+    const annotation =
+      (param as { typeAnnotation?: t.Node }).typeAnnotation ??
+      (annotated as { typeAnnotation?: t.Node } | undefined)?.typeAnnotation;
+    if (typeReferencesLiveRead(annotation)) indexes.push(index);
+  }
+  return indexes;
+}
+
+function functionParamsOf(node: t.Node | null | undefined): readonly t.Node[] | null {
+  if (
+    !node ||
+    (!t.isFunctionDeclaration(node) &&
+      !t.isFunctionExpression(node) &&
+      !t.isArrowFunctionExpression(node))
+  ) {
+    return null;
+  }
+  return node.params;
+}
+
+function scanReaderExports(
+  filePath: string,
+  resolveImport?:
+    | ((source: string, fromFile: string) => string | null)
+    | undefined,
+  depth = 0,
+): FileScan<Map<string, number[]>> {
+  const cached = freshScan(readerParamCache, filePath);
+  if (cached) return cached;
+  const found = new Map<string, number[]>();
+  const scan = { value: found, stamps: new Map([[filePath, fileStamp(filePath)]]) };
+  readerParamCache.set(filePath, scan);
+  if (depth > 10) return scan;
+  let code: string;
+  try {
+    code = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return scan;
+  }
+  let ast: t.Node;
+  try {
+    ast = parse(code, {
+      sourceType: "module",
+      plugins: ["jsx", "typescript"],
+      sourceFilename: filePath,
+    });
+  } catch {
+    return scan;
+  }
+  const record = (name: string, params: readonly t.Node[] | null) => {
+    if (!params) return;
+    const indexes = readerParamIndexes(params);
+    if (indexes.length > 0) found.set(name, indexes);
+  };
+  traverse(ast, {
+    ExportNamedDeclaration(p) {
+      const decl = p.node.declaration;
+      if (t.isFunctionDeclaration(decl) && decl.id && t.isIdentifier(decl.id)) {
+        record(decl.id.name, decl.params);
+      } else if (decl && t.isVariableDeclaration(decl)) {
+        for (const declarator of decl.declarations) {
+          if (!t.isIdentifier(declarator.id)) continue;
+          record(declarator.id.name, functionParamsOf(declarator.init));
+        }
+      }
+      const source = t.moduleSourceValue(p.node.source);
+      if (!source) return;
+      const resolved = resolveAnyImport(source, filePath, resolveImport);
+      if (!resolved) return;
+      const nested = scanReaderExports(resolved, resolveImport, depth + 1);
+      mergeStamps(scan.stamps, nested.stamps);
+      for (const spec of p.node.specifiers ?? []) {
+        if (!t.isExportSpecifier(spec)) continue;
+        const exported = t.importedBindingName(spec.exported);
+        const local = t.importedBindingName(spec.local);
+        if (!exported || !local) continue;
+        const indexes = nested.value.get(local);
+        if (indexes) found.set(exported, indexes);
+      }
+    },
+  });
+  return scan;
+}
+
+function readerIndexesForCallee(
+  path: NodePath,
+  imported: Map<string, number[]>,
+): number[] {
+  const callee = t.unwrapParens(path.node.callee as t.Node);
+  if (!t.isIdentifier(callee)) return [];
+  const binding = path.scope.getBinding(callee.name);
+  if (!binding) return [];
+  if (
+    binding.path.isImportSpecifier() ||
+    binding.path.isImportDefaultSpecifier()
+  ) {
+    return imported.get(callee.name) ?? [];
+  }
+  if (binding.path.isFunctionDeclaration()) {
+    return readerParamIndexes(binding.path.node.params);
+  }
+  if (binding.path.isVariableDeclarator()) {
+    return readerParamIndexes(functionParamsOf(binding.path.node.init) ?? []);
+  }
+  return [];
+}
+
+/**
+ * `createLiveState(..., props.selected)` passes a value into `LiveRead<T>`.
+ * Wrap reactive arguments so the reader re-reads props instead of snapshotting.
+ * Arguments that are already functions stay as written.
+ */
+function wrapLiveReadArguments(
+  ast: t.Node,
+  options: DerivedLocalOptions,
+): void {
+  const names = trackReactiveImports(ast);
+  const imported = new Map<string, number[]>();
+  const filename = options.filename ? path.resolve(options.filename) : "";
+  traverse(ast, {
+    ImportDeclaration(p) {
+      const source = t.moduleSourceValue(p.node.source);
+      if (!source || !filename) return;
+      const resolved = resolveAnyImport(source, filename, options.resolveImport);
+      if (!resolved) return;
+      const exports = scanReaderExports(resolved, options.resolveImport).value;
+      for (const spec of p.node.specifiers ?? []) {
+        if (t.isImportSpecifier(spec)) {
+          const exported = t.importedBindingName(spec.imported);
+          const indexes = exported ? exports.get(exported) : undefined;
+          if (indexes) imported.set(spec.local.name, indexes);
+        } else if (t.isImportDefaultSpecifier(spec)) {
+          const indexes = exports.get("default");
+          if (indexes) imported.set(spec.local.name, indexes);
+        }
+      }
+    },
+  });
+
+  const { functions } = collectComponentFunctions(ast, names.cc);
+  const scopes = new Map<t.Function, ReactiveScope>();
+  traverse(ast, {
+    CallExpression(callPath) {
+      const indexes = readerIndexesForCallee(callPath, imported);
+      if (indexes.length === 0) return;
+      const fnPath = callPath.getFunctionParent();
+      const fn = fnPath?.node;
+      if (!fnPath || !fn || !t.isFunction(fn) || !functions.has(fn)) return;
+      let scope = scopes.get(fn);
+      if (!scope) {
+        scope = { bindings: new Map() };
+        trackPropBindings(
+          scope,
+          fn.params[0],
+          getAllPropNames(fn.params[0]),
+        );
+        trackLocalScopeBindings(fnPath, names, scope, true);
+        scopes.set(fn, scope);
+      }
+      const argPaths = callPath.get("arguments");
+      const args = Array.isArray(argPaths) ? argPaths : [argPaths];
+      for (const index of indexes) {
+        const argPath = args[index];
+        if (!argPath || argPath.node.type === "SpreadElement") continue;
+        const expr = t.unwrapParens(argPath.node as t.Expression);
+        if (!t.isExpression(expr) || isFunctionLike(expr)) continue;
+        if (!containsReactiveRead(expr, scope)) continue;
+        argPath.replaceWith(t.arrowFunctionExpression([], argPath.node));
+      }
+    },
+  });
+}
+
 export function wrapReactiveExpressions(
   ast: t.Node,
   options: {
@@ -2248,6 +2801,7 @@ export function wrapReactiveExpressions(
   } = {},
 ): void {
   promoteReactiveConstInitializers(ast, options);
+  wrapLiveReadArguments(ast, options);
 
   // ─── Load metadata (not a traverse) ───────────────────────
   let metadata: Map<string, Map<string, Set<string>>> | null = null;
