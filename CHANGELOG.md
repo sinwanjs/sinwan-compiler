@@ -2,6 +2,12 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.1.1] — Compact analyzer cache
+
+### Fixed
+
+- **Analyzer cache is written without indentation (`analyze.ts`)**: `AnalyzerCache.save()` pretty-printed `cachePath` (`.sinwan/cache.json`) with two-space indentation and rewrites it after every transform, so a large app's dev cache reached 3 MB. It is now compact JSON, about 60% smaller and faster to write. The format is unchanged and older pretty-printed caches still restore.
+
 ## [1.1.0] — More derived locals, `LiveRead` arguments, and `export { X }` components
 
 ### Added

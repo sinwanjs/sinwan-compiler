@@ -1122,7 +1122,7 @@ export class AnalyzerCache {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(this.cachePath, JSON.stringify(data, null, 2));
+    fs.writeFileSync(this.cachePath, JSON.stringify(data));
   }
 
   private restore(): void {

@@ -90,6 +90,8 @@ describe("AnalyzerCache", () => {
       expect(cache1.reactiveProps.get(childFile)?.get("Child")).toEqual(
         new Set(),
       );
+      // Rewritten on every transform, so it is stored without indentation.
+      expect(fs.readFileSync(cachePath, "utf-8")).not.toContain("\n");
 
       const cache2 = new AnalyzerCache({ root: tmpDir, cachePath });
       expect(cache2.modules.has(childFile)).toBe(true);
