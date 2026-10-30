@@ -25,6 +25,7 @@ import {
   type CallSite,
 } from "./reactive-wrap";
 import { autoWrapComponents } from "./auto-cc";
+import { loadTsConfigPaths, type TsConfigPaths } from "./tsconfig";
 
 export type ImportInfo = {
   source: string;
@@ -451,31 +452,6 @@ export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
     localCallGraph,
     importedCallSites,
   };
-}
-
-type TsConfigPaths = Map<string, string[]>;
-
-function loadTsConfigPaths(tsConfigPath: string): TsConfigPaths | null {
-  try {
-    const raw = JSON.parse(fs.readFileSync(tsConfigPath, "utf-8")) as {
-      compilerOptions?: { paths?: Record<string, string[]>; baseUrl?: string };
-    };
-    const paths = raw.compilerOptions?.paths;
-    if (!paths) return null;
-    const baseUrl = raw.compilerOptions?.baseUrl;
-    const root = path.dirname(tsConfigPath);
-    const resolvedBase = baseUrl ? path.resolve(root, baseUrl) : root;
-    const result = new Map<string, string[]>();
-    for (const [pattern, mappings] of Object.entries(paths)) {
-      result.set(
-        pattern,
-        mappings.map((m) => path.resolve(resolvedBase, m)),
-      );
-    }
-    return result;
-  } catch {
-    return null;
-  }
 }
 
 function matchTsConfigPath(

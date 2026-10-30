@@ -2,6 +2,13 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.1.2] — Analyzer reads commented tsconfig files and `extends`
+
+### Fixed
+
+- **tsconfig `paths` with comments (`analyze.ts`, new `tsconfig.ts`)**: The analyzer read `tsConfigPath` with `JSON.parse`. tsconfig files are JSONC, and create-sinwan templates ship with `//` comments, so parsing failed silently and `@/…` aliases were never resolved. Props passed through an aliased import were then treated as static: for example `<PlanCard billing={billing.value} />` imported from `@/components/…` compiled `priceLabel(props.plan, props.billing)` as a one-time read, so the card never updated. Comments and trailing commas are now accepted.
+- **tsconfig `extends` (`tsconfig.ts`)**: `paths` and `baseUrl` are now inherited through `extends` (relative files, packages, and arrays, with later entries winning). Mappings resolve against `baseUrl` when set, otherwise against the config that declares `paths`, as in TypeScript. Missing, invalid or cyclic configs still fall back to no aliases instead of throwing.
+
 ## [1.1.1] — Compact analyzer cache
 
 ### Fixed
