@@ -1919,6 +1919,15 @@ describe("transformJSX", () => {
     expect(result.code).not.toContain("defaultChecked");
   });
 
+  it("emits HTML for in place of label htmlFor", () => {
+    const code = `const F = (p: { id: string }) => <div><label htmlFor="email">Email</label><label htmlFor={p.id}>Name</label></div>;`;
+    const result = transformJSX(code, "test.tsx");
+    expectFragment(result.code,
+      'html: "<div><label for=\\"email\\">Email</label><label for=\\"\\">Name</label></div>"',
+    );
+    expectFragment(result.code, '{ path: [1], type: "attr", name: "htmlFor" }');
+  });
+
   it("emits textarea defaultValue as text content", () => {
     const code = `const Note = () => <textarea defaultValue="hello" />;`;
     const result = transformJSX(code, "test.tsx");

@@ -147,6 +147,7 @@ function cleanJSXText(value: string): string {
 function htmlAttributeName(attrName: string): string {
   if (attrName === "defaultValue") return "value";
   if (attrName === "defaultChecked") return "checked";
+  if (attrName === "htmlFor") return "for";
   return attrName;
 }
 

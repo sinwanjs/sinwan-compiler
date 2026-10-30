@@ -2,6 +2,12 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.1.3] — Static label `htmlFor` emits `for`
+
+### Fixed
+
+- **`htmlFor` in hoisted template HTML (`transform.ts`)**: A static `<label htmlFor="email">` was serialized into the template markup as `htmlFor="email"`, which the HTML parser stores as an `htmlfor` attribute that browsers ignore, so the label was not tied to its control. Hoisted HTML now uses `for`, like `defaultValue` → `value`. Dynamic slots keep the JSX name `htmlFor`; **sinwan 2.1.2** maps it to `for` at runtime.
+
 ## [1.1.2] — Analyzer reads commented tsconfig files and `extends`
 
 ### Fixed
