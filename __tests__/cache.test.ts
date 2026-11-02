@@ -254,8 +254,9 @@ describe("AnalyzerCache", () => {
     );
     cache.remove("/project/Parent.tsx");
     expect(cache.modules.has("/project/Parent.tsx")).toBe(false);
+    // No caller left to learn from: every prop stays possibly reactive.
     expect(cache.reactiveProps.get("/project/Child.tsx")?.get("Child")).toEqual(
-      new Set(),
+      new Set(["title", "children"]),
     );
   });
 
@@ -303,6 +304,73 @@ describe("AnalyzerCache", () => {
       expect(cache.modules.has(ghostFile)).toBe(false);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("follows a barrel the bundler never loads (plain .ts), in bundler order", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sinwan-barrel-"));
+    const write = (rel: string, code: string) => {
+      const file = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, code);
+      return file;
+    };
+    const card = write(
+      "ui/card.tsx",
+      `
+      import { cc } from "sinwan/component";
+      const Inner = cc((props) => <p>{props.value}</p>);
+      export const Card = cc((props) => <Inner value={props.value} />);
+    `,
+    );
+    write("ui/index.ts", `export { Card } from "./card";`);
+    const page = write(
+      "Page.tsx",
+      `
+      import { cc } from "sinwan/component";
+      import { signal } from "sinwan/reactivity";
+      import { Card } from "./ui";
+      const Page = cc(() => {
+        const value = signal(1);
+        return <Card value={value.value} />;
+      });
+    `,
+    );
+    const cachePath = path.join(dir, ".sinwan/cache.json");
+    try {
+      const cache = new AnalyzerCache({ root: dir, cachePath });
+      // The plugin only loads .tsx files: the importer first, then the component.
+      cache.update(page, fs.readFileSync(page, "utf-8"));
+      cache.update(card, fs.readFileSync(card, "utf-8"));
+      expect(cache.reactiveProps.get(card)?.get("Card")).toEqual(new Set(["value"]));
+
+      // The barrel links the component back to its importer: editing the
+      // component recomputes with the page's call site still in the graph.
+      cache.update(card, fs.readFileSync(card, "utf-8") + "\n");
+      expect(cache.reactiveProps.get(card)?.get("Card")).toEqual(new Set(["value"]));
+
+      // The re-exports survive a save and restore.
+      const restored = new AnalyzerCache({ root: dir, cachePath });
+      expect(restored.modules.get(path.join(dir, "ui/index.ts"))?.reExports).toEqual([
+        { exported: "Card", source: "./card", imported: "Card" },
+      ]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a cache written by an older format", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sinwan-cache-v1-"));
+    const cachePath = path.join(dir, "cache.json");
+    try {
+      fs.writeFileSync(
+        cachePath,
+        JSON.stringify({ version: 1, modules: {}, reactiveProps: { "/x.tsx": { X: [] } } }),
+      );
+      const cache = new AnalyzerCache({ root: dir, cachePath });
+      expect(cache.reactiveProps.size).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

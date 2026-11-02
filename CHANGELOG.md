@@ -2,6 +2,17 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.1.4] — Analyzer follows barrel re-exports; components without known callers stay reactive
+
+### Fixed
+
+- **Re-exports through barrel files (`analyze.ts`)**: an import of a component from a module that only re-exports it (`index.ts` with `export { DataTable } from "./data-table"`, `export { A as B } from`, `export * from`) was dropped by the cross-file analysis, because the analyzer looked for the component in the barrel itself. The component then had no known callers, and props forwarded inside it to another component in the same file compiled as one-time reads: a sinwan-ui `DataTable` imported from `@/components/ui/data-table` never showed new `data` or `rowCount` after its first render, in dev and production builds (the bun plugin runs the analyzer cache by default). Re-exports are now followed to the defining module (cycle-safe; `export *` never re-exports `default`; `export * as ns` is not followed), local `export { X }` / `export { X as default }` count as exports, and the analyzer cache links barrels to the modules they re-export, so a change to the component recomputes with its importers' call sites.
+- **Exported components with no resolvable caller (`analyze.ts`)**: such a component got an empty reactive-prop set, which the transform trusts over its conservative fallback, so every prop became static. It now gets the same conservative set the transform uses without metadata (all props). Components whose resolved callers all pass static values still get an empty set.
+
+### Changed
+
+- The analyzer cache file format is version 2 (it stores re-exports); version 1 caches are ignored and rebuilt.
+
 ## [1.1.3] — Static label `htmlFor` emits `for`
 
 ### Fixed

@@ -18,6 +18,7 @@ import {
   collectComponentFunctions,
   collectComponentCallGraph,
   computeLocalScopes,
+  getAllPropNames,
   propagateReactiveProps,
   containsReactiveValue,
   trackReactiveImports,
@@ -41,11 +42,24 @@ export type ImportedCallSite = {
   spreads: t.Expression[];
 };
 
+/**
+ * A name this module re-exports from another one: `export { a as b } from "./x"`
+ * is `{ exported: "b", source: "./x", imported: "a" }`; `export * from "./x"`
+ * is `{ exported: "*", source: "./x", imported: "*" }`.
+ */
+export type ReExport = {
+  exported: string;
+  source: string;
+  imported: string;
+};
+
 export type ModuleAnalysis = {
   filePath: string;
   imports: Map<string, ImportInfo>;
   exports: Map<string, t.Function>;
   defaultExport: t.Function | null;
+  /** Re-exports, followed when an importer's call site resolves to this (barrel) module. */
+  reExports: ReExport[];
   componentFunctions: Set<t.Function>;
   localScopes: Map<t.Function, ReactiveScope>;
   localCallGraph: Map<t.Function, CallSite[]>;
@@ -105,14 +119,18 @@ type SerializedModule = {
   imports: Record<string, ImportInfo>;
   exports: Record<string, FunctionRef>;
   defaultExport: FunctionRef | null;
+  reExports: ReExport[];
   componentFunctions: FunctionRef[];
   localScopes: Record<string, SerializedScope>;
   localCallGraph: Record<string, SerializedCallSite[]>;
   importedCallSites: SerializedImportedCallSite[];
 };
 
+/** Bumped when `SerializedModule` changes: older caches are ignored, not misread. */
+const CACHE_VERSION = 2;
+
 type SerializedCache = {
-  version: 1;
+  version: typeof CACHE_VERSION;
   modules: Record<string, SerializedModule>;
   reactiveProps: Record<string, Record<string, string[]>>;
 };
@@ -179,6 +197,7 @@ function serializeModule(mod: ModuleAnalysis): SerializedModule {
       ]),
     ),
     defaultExport: mod.defaultExport ? functionRef(mod.defaultExport) : null,
+    reExports: mod.reExports,
     componentFunctions: Array.from(mod.componentFunctions).map(functionRef),
     localScopes,
     localCallGraph,
@@ -277,6 +296,7 @@ function restoreModule(
     imports,
     exports,
     defaultExport,
+    reExports: serialized.reExports,
     componentFunctions,
     localScopes,
     localCallGraph,
@@ -420,7 +440,32 @@ export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
     }
   }
 
+  const reExports: ReExport[] = [];
   traverse(ast, {
+    ExportNamedDeclaration(path: any) {
+      const source = moduleSourceOf(path.node);
+      for (const spec of path.node.specifiers ?? []) {
+        if (!t.isExportSpecifier(spec)) continue;
+        const exportedName = t.importedBindingName(spec.exported);
+        const localName = t.importedBindingName(spec.local);
+        if (!exportedName || !localName) continue;
+        if (source) {
+          reExports.push({ exported: exportedName, source, imported: localName });
+          continue;
+        }
+        // `export { Card }` / `export { Card as default }` of a local component.
+        const fn = componentNames.get(localName);
+        if (!fn) continue;
+        if (exportedName === "default") defaultExport = fn;
+        else exports.set(exportedName, fn);
+      }
+    },
+    ExportAllDeclaration(path: any) {
+      // `export * as ns from` exports a namespace object, not components by name.
+      if (path.node.exported) return;
+      const source = moduleSourceOf(path.node);
+      if (source) reExports.push({ exported: "*", source, imported: "*" });
+    },
     ExportDefaultDeclaration(path: any) {
       const decl = t.isNode(path.node.declaration)
         ? t.unwrapParens(path.node.declaration)
@@ -447,11 +492,54 @@ export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
     imports,
     exports,
     defaultExport,
+    reExports,
     componentFunctions: functions,
     localScopes,
     localCallGraph,
     importedCallSites,
   };
+}
+
+function moduleSourceOf(node: { source?: t.Node | null }): string | null {
+  return node.source ? t.moduleSourceValue(node.source) : null;
+}
+
+/**
+ * The component function an import of `name` from `filePath` refers to,
+ * following re-exports through barrel modules (`export { X } from`,
+ * `export * from`). `null` when it is not a component or cannot be resolved.
+ */
+function resolveExportedComponent(
+  filePath: string,
+  name: string,
+  getModule: (filePath: string) => ModuleAnalysis | undefined,
+  resolve: (source: string, fromFile: string) => string | null,
+  visited: Set<string> = new Set(),
+): t.Function | null {
+  const key = `${filePath}#${name}`;
+  if (visited.has(key)) return null;
+  visited.add(key);
+  const mod = getModule(filePath);
+  if (!mod) return null;
+  const own = name === "default" ? mod.defaultExport : mod.exports.get(name);
+  if (own) return own;
+  for (const reExport of mod.reExports) {
+    const named = reExport.exported === name;
+    // `export *` never re-exports `default`.
+    const star = reExport.exported === "*" && name !== "default";
+    if (!named && !star) continue;
+    const target = resolve(reExport.source, filePath);
+    if (!target) continue;
+    const found = resolveExportedComponent(
+      target,
+      named ? reExport.imported : name,
+      getModule,
+      resolve,
+      visited,
+    );
+    if (found) return found;
+  }
+  return null;
 }
 
 function matchTsConfigPath(
@@ -935,34 +1023,35 @@ function buildProjectReactiveProps(
 ): Map<string, Map<string, Set<string>>> {
   // Map imported call sites to target component functions and add them to the
   // global call graph. Lazily analyze workspace files that are not in the
-  // initial project scan.
+  // initial project scan, and follow re-exports through barrel modules.
+  const getModule = (filePath: string): ModuleAnalysis | undefined => {
+    const known = modules.get(filePath);
+    if (known || !ensureAnalyzed) return known;
+    const added = ensureAnalyzed(filePath);
+    if (!added) return undefined;
+    modules.set(filePath, added);
+    for (const [fn, scope] of added.localScopes) {
+      globalLocalScopes.set(fn, scope);
+    }
+    for (const fn of added.componentFunctions) {
+      globalComponentFunctions.add(fn);
+    }
+    for (const [callerFn, sites] of added.localCallGraph) {
+      const list = globalCallGraph.get(callerFn) ?? [];
+      list.push(...sites);
+      globalCallGraph.set(callerFn, list);
+    }
+    return added;
+  };
+  const called = new Set<t.Function>();
+  // Live iteration: modules analyzed lazily on the way are visited too.
   for (const mod of modules.values()) {
     for (const site of mod.importedCallSites) {
       const resolvedFile = resolve(site.source, mod.filePath);
       if (!resolvedFile) continue;
-      let targetMod = modules.get(resolvedFile);
-      if (!targetMod && ensureAnalyzed) {
-        targetMod = ensureAnalyzed(resolvedFile);
-        if (targetMod) {
-          for (const [fn, scope] of targetMod.localScopes) {
-            globalLocalScopes.set(fn, scope);
-          }
-          for (const fn of targetMod.componentFunctions) {
-            globalComponentFunctions.add(fn);
-          }
-          for (const [callerFn, sites] of targetMod.localCallGraph) {
-            const list = globalCallGraph.get(callerFn) ?? [];
-            list.push(...sites);
-            globalCallGraph.set(callerFn, list);
-          }
-        }
-      }
-      if (!targetMod) continue;
-      const targetFn =
-        site.name === "default"
-          ? targetMod.defaultExport
-          : targetMod.exports.get(site.name);
+      const targetFn = resolveExportedComponent(resolvedFile, site.name, getModule, resolve);
       if (!targetFn) continue;
+      called.add(targetFn);
 
       const list = globalCallGraph.get(site.caller) ?? [];
       list.push({
@@ -973,6 +1062,9 @@ function buildProjectReactiveProps(
       globalCallGraph.set(site.caller, list);
     }
   }
+  for (const sites of globalCallGraph.values()) {
+    for (const site of sites) called.add(site.callee);
+  }
 
   // Run the existing fixed-point propagation over the global graph.
   const globalReactiveProps = propagateReactiveProps(
@@ -981,17 +1073,24 @@ function buildProjectReactiveProps(
     globalComponentFunctions,
   );
 
-  // Extract reactive props for exported components only.
+  // Extract reactive props for exported components only. A component with no
+  // call site this graph resolves may be used by modules outside it (other
+  // chunks, dynamic tags, tests): an empty set would make the transform treat
+  // every prop as static, so fall back to all its props, like the transform
+  // does without metadata.
+  const exportedProps = (fn: t.Function): Set<string> => {
+    if (!called.has(fn)) return getAllPropNames(fn.params[0]);
+    const props = globalReactiveProps.get(fn);
+    return props ? new Set(props) : new Set();
+  };
   const reactiveProps = new Map<string, Map<string, Set<string>>>();
   for (const mod of modules.values()) {
     const fileMap = new Map<string, Set<string>>();
     for (const [exportName, fn] of mod.exports) {
-      const props = globalReactiveProps.get(fn);
-      fileMap.set(exportName, props ? new Set(props) : new Set());
+      fileMap.set(exportName, exportedProps(fn));
     }
     if (mod.defaultExport) {
-      const props = globalReactiveProps.get(mod.defaultExport);
-      fileMap.set("default", props ? new Set(props) : new Set());
+      fileMap.set("default", exportedProps(mod.defaultExport));
     }
     reactiveProps.set(mod.filePath, fileMap);
   }
@@ -1085,7 +1184,7 @@ export class AnalyzerCache {
   save(): void {
     if (!this.cachePath) return;
     const data: SerializedCache = {
-      version: 1,
+      version: CACHE_VERSION,
       modules: Object.fromEntries(
         Array.from(this.modules.entries()).map(([filePath, mod]) => [
           filePath,
@@ -1111,7 +1210,7 @@ export class AnalyzerCache {
     } catch {
       return;
     }
-    if (data.version !== 1) return;
+    if (data.version !== CACHE_VERSION) return;
 
     for (const [filePath, serialized] of Object.entries(data.modules)) {
       const mod = restoreModule(filePath, serialized);
@@ -1136,10 +1235,22 @@ export class AnalyzerCache {
     }
   }
 
+  /** Files `mod` depends on for analysis: modules its JSX imports from, and modules it re-exports. */
+  private dependencies(mod: ModuleAnalysis): string[] {
+    const sources = [
+      ...mod.importedCallSites.map((site) => site.source),
+      ...mod.reExports.map((reExport) => reExport.source),
+    ];
+    const files: string[] = [];
+    for (const source of sources) {
+      const resolvedFile = this.resolve(source, mod.filePath);
+      if (resolvedFile) files.push(resolvedFile);
+    }
+    return files;
+  }
+
   private addImporters(mod: ModuleAnalysis): void {
-    for (const site of mod.importedCallSites) {
-      const resolvedFile = this.resolve(site.source, mod.filePath);
-      if (!resolvedFile) continue;
+    for (const resolvedFile of this.dependencies(mod)) {
       let set = this.importers.get(resolvedFile);
       if (!set) {
         set = new Set();
@@ -1150,9 +1261,7 @@ export class AnalyzerCache {
   }
 
   private removeImporters(mod: ModuleAnalysis): void {
-    for (const site of mod.importedCallSites) {
-      const resolvedFile = this.resolve(site.source, mod.filePath);
-      if (!resolvedFile) continue;
+    for (const resolvedFile of this.dependencies(mod)) {
       this.importers.get(resolvedFile)?.delete(mod.filePath);
     }
   }
@@ -1190,12 +1299,10 @@ export class AnalyzerCache {
         if (!affected.has(importer)) queue.push(importer);
       }
 
-      // Add imported modules so the subgraph has enough context to propagate.
-      for (const site of mod.importedCallSites) {
-        const resolved = this.resolve(site.source, mod.filePath);
-        if (resolved && !affected.has(resolved)) {
-          queue.push(resolved);
-        }
+      // Add imported and re-exported modules so the subgraph has enough
+      // context to propagate (a barrel's re-exports lead to the component).
+      for (const resolved of this.dependencies(mod)) {
+        if (!affected.has(resolved)) queue.push(resolved);
       }
     }
     return affected;

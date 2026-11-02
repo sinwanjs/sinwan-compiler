@@ -195,7 +195,10 @@ describe("analyzeProject", () => {
     try {
       fs.writeFileSync(
         path.join(tmpDir, "bunfig.toml"),
-        `[install]\nalias = { "@components": "src/components" }\n`,
+        // TOML inline tables use `=`. With `:` the alias never parsed, and
+        // the test only passed because an unresolved caller also gave an
+        // empty set.
+        `[install]\nalias = { "@components" = "src/components" }\n`,
       );
       fs.mkdirSync(path.join(tmpDir, "src", "components"), {
         recursive: true,
@@ -553,6 +556,130 @@ describe("analyzeProject", () => {
       "/project/App.tsx",
     );
     expect(mod.localCallGraph.size).toBeGreaterThan(0);
+  });
+});
+
+describe("analyzeProject re-exports", () => {
+  const card = `
+    import { cc } from "sinwan/component";
+    const Inner = cc((props) => <p>{props.value}</p>);
+    export const Card = cc((props) => <Inner value={props.value} />);
+    export default Card;
+  `;
+  const reactivePage = (importLine: string, tag: string) => `
+    import { cc } from "sinwan/component";
+    import { signal } from "sinwan/reactivity";
+    ${importLine}
+    const Page = cc(() => {
+      const value = signal(1);
+      return <${tag} value={value.value} />;
+    });
+  `;
+  const cardProps = (files: Record<string, string>, name = "Card") =>
+    analyzeProject({ root: "/project", resolve: resolve(files), files }).reactiveProps
+      .get("/project/ui/card.tsx")
+      ?.get(name);
+
+  it("follows a named re-export in a barrel to the component's module", () => {
+    expect(
+      cardProps({
+        "/project/ui/card.tsx": card,
+        "/project/ui/index.ts": `export { Card } from "./card";`,
+        "/project/Page.tsx": reactivePage(`import { Card } from "./ui/index";`, "Card"),
+      }),
+    ).toEqual(new Set(["value"]));
+  });
+
+  it("follows renamed re-exports, export *, default re-exports and chained barrels", () => {
+    const files = {
+      "/project/ui/card.tsx": card,
+      "/project/ui/named.ts": `export { Card as Panel, default as Tile } from "./card";`,
+      "/project/ui/all.ts": `export * from "./named";`,
+      "/project/Page.tsx": `
+        import { cc } from "sinwan/component";
+        import { signal } from "sinwan/reactivity";
+        import { Panel, Tile } from "./ui/all";
+        const Page = cc(() => {
+          const value = signal(1);
+          return <div><Panel value={value.value} /><Tile tone={value.value} /></div>;
+        });
+      `,
+    };
+    expect(cardProps(files)).toEqual(new Set(["value", "tone"]));
+  });
+
+  it("export * does not re-export default", () => {
+    const files = {
+      "/project/ui/card.tsx": card,
+      "/project/ui/all.ts": `export * from "./card";`,
+      "/project/Page.tsx": reactivePage(`import Thing from "./ui/all";`, "Thing"),
+    };
+    // Nothing resolves to Card, so it keeps the conservative fallback.
+    expect(cardProps(files, "default")).toEqual(new Set(["*"]));
+  });
+
+  it("stops on re-export cycles and unresolvable sources", () => {
+    const files = {
+      "/project/ui/card.tsx": card,
+      "/project/ui/a.ts": `export * from "./b"; export { Missing } from "./nowhere";`,
+      "/project/ui/b.ts": `export * from "./a";`,
+      "/project/Page.tsx": reactivePage(`import { Missing } from "./ui/a";`, "Missing"),
+    };
+    expect(cardProps(files)).toEqual(new Set(["*"]));
+  });
+
+  it("counts local `export { X }` and `export { X as default }` as exports", () => {
+    const local = `
+      import { cc } from "sinwan/component";
+      const Card = cc((props) => <p>{props.value}</p>);
+      const Badge = cc(({ tone }) => <b>{tone}</b>);
+      export { Card, Badge as default };
+    `;
+    const project = analyzeProject({
+      root: "/project",
+      resolve: resolve({ "/project/ui/card.tsx": local }),
+      files: { "/project/ui/card.tsx": local },
+    });
+    const exports = project.reactiveProps.get("/project/ui/card.tsx");
+    expect(exports?.get("Card")).toEqual(new Set(["*"]));
+    expect(exports?.get("default")).toEqual(new Set(["tone", "children"]));
+    expect(project.modules.get("/project/ui/card.tsx")?.reExports).toEqual([]);
+  });
+
+  it("keeps an exported component without resolvable callers conservative, not static", () => {
+    // An empty set would make the transform pass every prop as a snapshot.
+    expect(cardProps({ "/project/ui/card.tsx": card })).toEqual(new Set(["*"]));
+  });
+
+  it("analyzes a component module found on disk, with its own call graph", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sinwan-lazy-"));
+    try {
+      const cardFile = path.join(dir, "card.tsx");
+      fs.writeFileSync(cardFile, card);
+      const pageFile = path.join(dir, "Page.tsx");
+      const project = analyzeProject({
+        root: dir,
+        // Only the page is in the scan; the card is read from disk when resolved.
+        files: { [pageFile]: reactivePage(`import { Card } from "./card";`, "Card") },
+        resolve: (source) => (source === "./card" ? cardFile : null),
+      });
+      expect(project.reactiveProps.get(cardFile)?.get("Card")).toEqual(new Set(["value"]));
+      expect(project.modules.get(cardFile)?.localCallGraph.size).toBe(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("records re-exports, ignoring `export * as ns`", () => {
+    const mod = analyzeModule(
+      `export { A, B as C } from "./a"; export * from "./b"; export * as ns from "./c";`,
+      "/project/index.ts",
+    );
+    expect(mod.reExports).toEqual([
+      { exported: "A", source: "./a", imported: "A" },
+      { exported: "C", source: "./a", imported: "B" },
+      { exported: "*", source: "./b", imported: "*" },
+    ]);
   });
 });
 
