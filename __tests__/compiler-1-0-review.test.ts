@@ -24,6 +24,22 @@ describe("1.0.0 review regressions", () => {
     expect(open).toContain("<!-- note -->");
   });
 
+  it("counts a printed JSX comment as a child node in later slot paths", () => {
+    const code = compile(`
+      import { signal } from "sinwan/reactivity";
+      const View = () => {
+        const x = signal(1);
+        return <div><p>static</p>{/* note */}<span title={String(x.value)}>{x.value}</span>{/* a */}{/* b */}<b>{x.value}</b>{x.value}</div>;
+      };
+    `);
+    // p = 0, comment = 1, span = 2, two comments = 3 and 4, b = 5, slot marker = 6.
+    expect(code).toContain("<p>static</p><!-- note --><span title=\\\"\\\"></span><!-- a --><!-- b --><b></b>");
+    expect(code).toContain(`{ path: [2], type: "attr", name: "title" }`);
+    expect(code).toContain(`{ path: [2], type: "child" }`);
+    expect(code).toContain(`{ path: [5], type: "child" }`);
+    expect(code).toContain(`{ path: [6], type: "child" }`);
+  });
+
   it("does not treat a trailing inner comment as the next export's pure annotation", () => {
     const dir = mkdtempSync(join(tmpdir(), "sinwan-pure-"));
     const file = join(dir, "helpers.ts");

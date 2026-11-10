@@ -2,6 +2,12 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.1.5] — JSX comments no longer shift template slot paths
+
+### Fixed
+
+- **JSX comments in templates (`transform.ts`)**: a `{/* note */}` child is printed into the template HTML as `<!-- note -->`, which the browser parses as a node, but it was not counted when computing the paths of the slots after it. Every later attribute, event and child binding in that element pointed one node too early. At runtime this threw `Sinwan template: invalid slot path`, or bound to the wrong node. Printed comments now count as children, so later paths match the parsed template.
+
 ## [1.1.4] — Analyzer follows barrel re-exports; components without known callers stay reactive
 
 ### Fixed

@@ -502,6 +502,7 @@ function childrenToHtml(
             typeof comment.value === "string"
           ) {
             html += `<!--${comment.value.replace(/--/g, "")}-->`;
+            childIndex++;
           }
         }
         continue;
