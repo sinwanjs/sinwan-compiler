@@ -404,7 +404,11 @@ function collectImportedCallSites(
   return sites;
 }
 
-export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
+export function analyzeModule(
+  code: string,
+  filePath: string,
+  resolveImport?: (source: string, fromFile: string) => string | null,
+): ModuleAnalysis {
   const ast = parse(code, {
     sourceType: "module",
     plugins: ["jsx", "typescript"],
@@ -416,7 +420,8 @@ export function analyzeModule(code: string, filePath: string): ModuleAnalysis {
   // `cc` import is picked up as a component factory.
   autoWrapComponents(ast, filePath);
 
-  const names = trackReactiveImports(ast);
+  // Reactive imports (`i18n.t("x")`) make the props they feed reactive too.
+  const names = trackReactiveImports(ast, { filename: filePath, resolveImport });
   const {
     functions,
     names: componentNames,
@@ -957,13 +962,13 @@ export function analyzeProject(options: {
   const providedFiles = options.files;
   if (providedFiles) {
     for (const [filePath, code] of Object.entries(providedFiles)) {
-      modules.set(filePath, analyzeModule(code, filePath));
+      modules.set(filePath, analyzeModule(code, filePath, resolve));
     }
   } else {
     const files = findFiles(options.root, extensions);
     for (const file of files) {
       const code = fs.readFileSync(file, "utf-8");
-      modules.set(file, analyzeModule(code, file));
+      modules.set(file, analyzeModule(code, file, resolve));
     }
   }
 
@@ -973,7 +978,7 @@ export function analyzeProject(options: {
     if (modules.has(filePath)) return modules.get(filePath);
     try {
       const code = fs.readFileSync(filePath, "utf-8");
-      const mod = analyzeModule(code, filePath);
+      const mod = analyzeModule(code, filePath, resolve);
       modules.set(filePath, mod);
       return mod;
     } catch {
@@ -1157,7 +1162,7 @@ export class AnalyzerCache {
 
   update(filePath: string, code: string): void {
     const oldMod = this.modules.get(filePath);
-    const newMod = analyzeModule(code, filePath);
+    const newMod = analyzeModule(code, filePath, this.resolve);
     this.modules.set(filePath, newMod);
     if (oldMod) this.removeImporters(oldMod);
     this.addImporters(newMod);
@@ -1270,7 +1275,7 @@ export class AnalyzerCache {
     if (this.modules.has(filePath)) return this.modules.get(filePath);
     try {
       const code = fs.readFileSync(filePath, "utf-8");
-      const mod = analyzeModule(code, filePath);
+      const mod = analyzeModule(code, filePath, this.resolve);
       this.modules.set(filePath, mod);
       return mod;
     } catch {

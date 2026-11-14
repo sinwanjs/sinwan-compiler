@@ -15,6 +15,7 @@ const files = [
   "compiler-1-0-review.test.ts",
   "auto-cc.test.ts",
   "tsconfig-paths.test.ts",
+  "reactive-imports.test.ts",
 ].map((file) => path.join(testsDir, file));
 
 const result = Bun.spawnSync({

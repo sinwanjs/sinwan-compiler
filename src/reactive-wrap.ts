@@ -45,6 +45,10 @@ export interface ImportNames {
   useState: Set<string>;
   useFetch: Set<string>;
   cc: Set<string>;
+  /** Module-level objects whose member calls are reactive (`i18n.t("x")`); see `collectReactiveImports`. */
+  reactiveObjects: Set<string>;
+  /** Module-level functions whose calls are reactive (`t("x")`). */
+  reactiveFunctions: Set<string>;
 }
 
 const REACTIVE_SOURCE_MODULES: Record<string, Set<string>> = {
@@ -128,7 +132,14 @@ function isReactiveContainerPassThrough(
   return binding.kind === "mutable" || binding.kind === "prop";
 }
 
-export function trackReactiveImports(ast: t.Node): ImportNames {
+export function trackReactiveImports(
+  ast: t.Node,
+  options: {
+    filename?: string;
+    resolveImport?: (source: string, fromFile: string) => string | null;
+  } = {},
+): ImportNames {
+  const reactive = collectReactiveImports(ast, options.filename, options.resolveImport);
   const names: ImportNames = {
     createMutable: new Set(),
     createStore: new Set(),
@@ -137,6 +148,8 @@ export function trackReactiveImports(ast: t.Node): ImportNames {
     useState: new Set(),
     useFetch: new Set(),
     cc: new Set(),
+    reactiveObjects: reactive.objects,
+    reactiveFunctions: reactive.functions,
   };
 
   traverse(ast, {
@@ -599,6 +612,312 @@ function collectPureImports(
   return result;
 }
 
+// ─── Reactive imports (known factories and @sinwan-reactive) ─────
+
+/**
+ * Factories whose result is an object with reactive methods: every member
+ * call on it reads signals, whatever its arguments (`i18n.t("nav.sales")`).
+ */
+const REACTIVE_OBJECT_FACTORIES: Record<string, Set<string>> = {
+  "sinwan-i18n": new Set(["createI18n"]),
+};
+
+/**
+ * How a reactive module-level value is called:
+ * - "object": member calls are reactive — `i18n.t("x")`, `presence.isOnline(id)`
+ * - "function": direct calls are reactive — `t("x")`
+ */
+type ReactiveExportKind = "object" | "function";
+
+interface ReactiveModule {
+  /** Module-level names (declared or imported) that are reactive. */
+  locals: Map<string, ReactiveExportKind>;
+  /** Exported names that are reactive (`default` for the default export). */
+  exports: Map<string, ReactiveExportKind>;
+}
+
+export interface ReactiveImports {
+  objects: Set<string>;
+  functions: Set<string>;
+}
+
+type ResolveImport =
+  | ((source: string, fromFile: string) => string | null)
+  | undefined;
+
+const reactiveModuleCache = new Map<string, FileScan<ReactiveModule>>();
+
+function hasReactiveJSDoc(node: unknown): boolean {
+  const comments = (node as { leadingComments?: { type: string; value: string }[] } | null)
+    ?.leadingComments;
+  return (
+    comments?.some(
+      (c) => c.type === "CommentBlock" && c.value.includes("@sinwan-reactive"),
+    ) ?? false
+  );
+}
+
+function reactiveKindOfInit(init: t.Node | null | undefined): ReactiveExportKind {
+  return init && (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init))
+    ? "function"
+    : "object";
+}
+
+function exportedName(node: t.Node): string {
+  return t.isIdentifier(node) ? node.name : String((node as { value?: unknown }).value);
+}
+
+/**
+ * The reactive names of a module: values made by a known factory, values
+ * annotated `/** @sinwan-reactive *\/`, functions taken from a reactive object
+ * (`const { t } = i18n`, `const t = i18n.t`), and what it re-exports.
+ * Imports are resolved lazily, only when a declaration or an export needs them;
+ * `resolveAllImports` resolves every import (the file being compiled).
+ */
+function analyzeReactiveModule(
+  ast: t.Node,
+  filePath: string | null,
+  resolveImport: ResolveImport,
+  depth: number,
+  stamps: Map<string, number>,
+  resolveAllImports: boolean,
+): ReactiveModule {
+  const locals = new Map<string, ReactiveExportKind>();
+  const exports = new Map<string, ReactiveExportKind>();
+  const factories = new Set<string>();
+  const imports = new Map<string, { source: string; imported: string }>();
+  const resolvedImports = new Map<string, ReactiveExportKind | null>();
+
+  const moduleExports = (source: string): Map<string, ReactiveExportKind> | null => {
+    if (!filePath) return null;
+    const resolved = resolveAnyImport(source, filePath, resolveImport);
+    if (!resolved) return null;
+    const nested = reactiveModuleOf(resolved, resolveImport, depth + 1);
+    mergeStamps(stamps, nested.stamps);
+    return nested.value.exports;
+  };
+
+  const kindOf = (name: string): ReactiveExportKind | undefined => {
+    const local = locals.get(name);
+    if (local) return local;
+    const spec = imports.get(name);
+    if (!spec) return undefined;
+    if (!resolvedImports.has(name)) {
+      const found = moduleExports(spec.source);
+      let kind: ReactiveExportKind | null = null;
+      if (found) {
+        // A namespace with any reactive export: `ns.i18n.t("x")` is a member call on it.
+        kind = spec.imported === "*" ? (found.size > 0 ? "object" : null) : (found.get(spec.imported) ?? null);
+      }
+      resolvedImports.set(name, kind);
+    }
+    return resolvedImports.get(name) ?? undefined;
+  };
+
+  const declare = (declaration: t.Node | null | undefined, annotated: boolean): void => {
+    if (!declaration) return;
+    if (t.isFunctionDeclaration(declaration) || t.isClassDeclaration(declaration)) {
+      if ((annotated || hasReactiveJSDoc(declaration)) && t.isIdentifier(declaration.id)) {
+        locals.set(declaration.id.name, t.isClassDeclaration(declaration) ? "object" : "function");
+      }
+      return;
+    }
+    if (!t.isVariableDeclaration(declaration)) return;
+    const isAnnotated = annotated || hasReactiveJSDoc(declaration);
+    for (const d of declaration.declarations) {
+      const id = d.id as t.Node;
+      const init = d.init ? t.unwrapParens(d.init as t.Node) : null;
+      if (t.isIdentifier(id)) {
+        if (isAnnotated) {
+          locals.set(id.name, reactiveKindOfInit(init));
+        } else if (init && t.isCallExpression(init) && t.isIdentifier(init.callee) && factories.has(init.callee.name)) {
+          locals.set(id.name, "object");
+        } else if (init && t.isIdentifier(init) && kindOf(init.name)) {
+          locals.set(id.name, kindOf(init.name)!);
+        } else if (init && t.isMemberExpression(init) && !init.computed) {
+          const root = getMemberExpressionRootAndPath(init);
+          if (root && kindOf(root.root) === "object") locals.set(id.name, "function");
+        }
+      } else if (t.isObjectPattern(id) && init && t.isIdentifier(init) && kindOf(init.name) === "object") {
+        for (const prop of id.properties) {
+          if (!t.isObjectProperty(prop)) continue;
+          const value = t.isAssignmentPattern(prop.value) ? prop.value.left : prop.value;
+          if (t.isIdentifier(value)) locals.set(value.name, "function");
+        }
+      }
+    }
+  };
+
+  const body = (ast as { program?: { body?: t.Node[] } }).program?.body ?? [];
+  for (const stmt of body) {
+    if (t.isImportDeclaration(stmt)) {
+      if ((stmt as { importKind?: string }).importKind === "type") continue;
+      const source = t.moduleSourceValue(stmt.source);
+      if (!source) continue;
+      const factoryNames = REACTIVE_OBJECT_FACTORIES[source];
+      for (const spec of stmt.specifiers ?? []) {
+        if (t.isImportSpecifier(spec)) {
+          const imported = t.importedBindingName(spec.imported);
+          if (!imported) continue;
+          if (factoryNames?.has(imported)) factories.add(spec.local.name);
+          else imports.set(spec.local.name, { source, imported });
+        } else if (t.isImportDefaultSpecifier(spec)) {
+          imports.set(spec.local.name, { source, imported: "default" });
+        } else if (t.isImportNamespaceSpecifier(spec)) {
+          imports.set(spec.local.name, { source, imported: "*" });
+        }
+      }
+    } else if (stmt.type === "ExportNamedDeclaration") {
+      const annotated = hasReactiveJSDoc(stmt);
+      declare(stmt.declaration as t.Node | null, annotated);
+      const source = t.moduleSourceValue(stmt.source);
+      const nested = source ? moduleExports(source) : null;
+      for (const spec of stmt.specifiers ?? []) {
+        if (!t.isExportSpecifier(spec)) continue;
+        const local = exportedName(spec.local as t.Node);
+        const kind = source ? nested?.get(local) : kindOf(local);
+        if (kind) exports.set(exportedName(spec.exported as t.Node), kind);
+      }
+    } else if (stmt.type === "ExportAllDeclaration") {
+      const source = t.moduleSourceValue(stmt.source);
+      const nested = source ? moduleExports(source) : null;
+      if (!nested) continue;
+      const alias = (stmt as { exported?: t.Node | null }).exported;
+      if (alias) {
+        if (nested.size > 0) exports.set(exportedName(alias), "object");
+        continue;
+      }
+      for (const [name, kind] of nested) {
+        if (name !== "default") exports.set(name, kind);
+      }
+    } else if (stmt.type === "ExportDefaultDeclaration") {
+      const decl = t.unwrapParens(stmt.declaration as t.Node);
+      if (t.isIdentifier(decl)) {
+        const kind = kindOf(decl.name);
+        if (kind) exports.set("default", kind);
+      } else if (t.isCallExpression(decl) && t.isIdentifier(decl.callee) && factories.has(decl.callee.name)) {
+        exports.set("default", "object");
+      } else if (hasReactiveJSDoc(stmt)) {
+        exports.set(
+          "default",
+          t.isClassDeclaration(decl) || t.isObjectExpression(decl) ? "object" : "function",
+        );
+      }
+    } else {
+      declare(stmt, false);
+    }
+  }
+
+  // Exported declarations: `export const i18n = createI18n(...)`, `export const { t } = i18n`.
+  for (const stmt of body) {
+    if (stmt.type !== "ExportNamedDeclaration" || !stmt.declaration) continue;
+    const decl = stmt.declaration as t.Node;
+    const names: string[] = [];
+    if (t.isVariableDeclaration(decl)) {
+      for (const d of decl.declarations) collectPatternNames(d.id as t.Node, names);
+    } else if ((t.isFunctionDeclaration(decl) || t.isClassDeclaration(decl)) && t.isIdentifier(decl.id)) {
+      names.push(decl.id.name);
+    }
+    for (const name of names) {
+      const kind = locals.get(name);
+      if (kind) exports.set(name, kind);
+    }
+  }
+
+  if (resolveAllImports) {
+    for (const name of imports.keys()) {
+      const kind = kindOf(name);
+      if (kind) locals.set(name, kind);
+    }
+  }
+
+  return { locals, exports };
+}
+
+function collectPatternNames(pattern: t.Node, into: string[]): void {
+  if (t.isIdentifier(pattern)) {
+    into.push(pattern.name);
+  } else if (t.isObjectPattern(pattern)) {
+    for (const prop of pattern.properties) {
+      if (t.isObjectProperty(prop)) {
+        const value = t.isAssignmentPattern(prop.value) ? prop.value.left : prop.value;
+        collectPatternNames(value as t.Node, into);
+      }
+    }
+  }
+}
+
+function scanReactiveModule(
+  filePath: string,
+  resolveImport: ResolveImport,
+  depth: number,
+): FileScan<ReactiveModule> {
+  const scan: FileScan<ReactiveModule> = {
+    value: { locals: new Map(), exports: new Map() },
+    stamps: new Map([[filePath, fileStamp(filePath)]]),
+  };
+  if (depth > 10) return scan; // re-export cycles
+  let ast: t.Node;
+  try {
+    ast = parse(fs.readFileSync(filePath, "utf-8"), {
+      sourceType: "module",
+      plugins: ["jsx", "typescript"],
+      sourceFilename: filePath,
+    });
+  } catch {
+    return scan;
+  }
+  scan.value = analyzeReactiveModule(ast, filePath, resolveImport, depth, scan.stamps, false);
+  return scan;
+}
+
+function reactiveModuleOf(
+  filePath: string,
+  resolveImport: ResolveImport,
+  depth = 0,
+): FileScan<ReactiveModule> {
+  const cached = freshScan(reactiveModuleCache, filePath);
+  if (cached) return cached;
+  // Mark the file while it is scanned, so an import cycle reads it as empty.
+  reactiveModuleCache.set(filePath, {
+    value: { locals: new Map(), exports: new Map() },
+    stamps: new Map([[filePath, fileStamp(filePath)]]),
+  });
+  const scan = scanReactiveModule(filePath, resolveImport, depth);
+  reactiveModuleCache.set(filePath, scan);
+  return scan;
+}
+
+const reactiveImportsByAst = new WeakMap<t.Node, ReactiveImports>();
+
+/**
+ * Module-level names of the file being compiled whose calls read signals:
+ * imports of reactive exports from other modules, and same-file values made
+ * by a known factory, annotated `@sinwan-reactive`, or taken from either.
+ */
+export function collectReactiveImports(
+  ast: t.Node,
+  filename: string | undefined,
+  resolveImport: ResolveImport,
+): ReactiveImports {
+  const cached = reactiveImportsByAst.get(ast);
+  if (cached) return cached;
+  const { locals } = analyzeReactiveModule(
+    ast,
+    filename ? path.resolve(filename) : null,
+    resolveImport,
+    0,
+    new Map(),
+    true,
+  );
+  const result: ReactiveImports = { objects: new Set(), functions: new Set() };
+  for (const [name, kind] of locals) {
+    (kind === "object" ? result.objects : result.functions).add(name);
+  }
+  reactiveImportsByAst.set(ast, result);
+  return result;
+}
+
 type BindingKind = "mutable" | "signal" | "computed" | "getter" | "function";
 
 export interface MutableBinding {
@@ -640,6 +959,16 @@ export interface PropBinding {
   kind: "prop";
 }
 
+/** A module-level object whose member calls read signals (`i18n.t("x")`, any arguments). */
+export interface ReactiveObjectBinding {
+  kind: "reactiveObject";
+}
+
+/** A module-level function whose calls read signals (`t("x")`, any arguments). */
+export interface ReactiveFunctionBinding {
+  kind: "reactiveFunction";
+}
+
 export type Binding =
   | MutableBinding
   | SignalBinding
@@ -647,7 +976,9 @@ export type Binding =
   | GetterBinding
   | FunctionBinding
   | SignalObjectBinding
-  | PropBinding;
+  | PropBinding
+  | ReactiveObjectBinding
+  | ReactiveFunctionBinding;
 
 export interface ReactiveScope {
   bindings: Map<string, Binding>;
@@ -721,6 +1052,24 @@ function isUseFetchCall(expr: t.Expression, names: ImportNames): boolean {
   return false;
 }
 
+/** Whether `name`, seen from `path`, is the module-level binding (not shadowed by a parameter or local). */
+function resolvesToModuleLevel(path: NodePath, name: string): boolean {
+  type LexicalScope = { bindings: Map<string, unknown>; parent: LexicalScope | null; path: { node: t.Node } };
+  let scope = (path as { scope?: LexicalScope | null }).scope ?? null;
+  while (scope && !scope.bindings.has(name)) scope = scope.parent;
+  return scope?.path.node.type === "Program";
+}
+
+/** Reactive imports and module-level reactive values, unless the function shadows them. */
+function seedReactiveImports(path: NodePath, names: ImportNames, scope: ReactiveScope): void {
+  for (const name of names.reactiveObjects) {
+    if (resolvesToModuleLevel(path, name)) scope.bindings.set(name, { kind: "reactiveObject" });
+  }
+  for (const name of names.reactiveFunctions) {
+    if (resolvesToModuleLevel(path, name)) scope.bindings.set(name, { kind: "reactiveFunction" });
+  }
+}
+
 function trackLocalScopeBindings(
   path: NodePath,
   names: ImportNames,
@@ -739,6 +1088,7 @@ function trackLocalScopeBindings(
         : visitors,
     );
   };
+  seedReactiveImports(path, names, scope);
   // First pass: collect reactive source bindings (signals, mutables, getters).
   collect({
     VariableDeclarator(p: any) {
@@ -1093,9 +1443,10 @@ function isReactiveRead(node: t.Node, scope: ReactiveScope): boolean {
   const rootPath = getMemberExpressionRootAndPath(node);
   if (!rootPath) return false;
   const binding = scope.bindings.get(rootPath.root);
-  if (!binding) {
+  if (!binding || binding.kind === "reactiveObject" || binding.kind === "reactiveFunction") {
     // Signals from inject / useTheme / other modules are not local `signal()`
-    // bindings. `{theme.value}` and `{api.theme.value}` still need wrapping.
+    // bindings. `{theme.value}` and `{api.theme.value}` still need wrapping;
+    // so does `{i18n.locale.value}` on a reactive import.
     return isSignalValuePath(rootPath.path);
   }
 
@@ -1118,6 +1469,17 @@ function isReactiveRead(node: t.Node, scope: ReactiveScope): boolean {
   return false;
 }
 
+/** `t("x")` or `i18n.t("x")` on a reactive import: a read of signals, without side effects. */
+function isReactiveImportCall(node: t.Node, scope: ReactiveScope): boolean {
+  const call = t.unwrapCall(node);
+  if (!t.isCallExpression(call)) return false;
+  const callee = t.unwrapParens((call as { callee: t.Node }).callee);
+  if (t.isIdentifier(callee)) return scope.bindings.get(callee.name)?.kind === "reactiveFunction";
+  if (!isMemberLike(callee)) return false;
+  const rootPath = getMemberExpressionRootAndPath(callee);
+  return !!rootPath && scope.bindings.get(rootPath.root)?.kind === "reactiveObject";
+}
+
 function isGetterCall(
   node: t.CallExpression | t.OptionalCallExpression | t.Node,
   scope: ReactiveScope,
@@ -1127,7 +1489,7 @@ function isGetterCall(
   const callee = t.unwrapParens((call as { callee: t.Node }).callee);
   if (t.isIdentifier(callee)) {
     const binding = scope.bindings.get(callee.name);
-    if (binding?.kind === "getter") return true;
+    if (binding?.kind === "getter" || binding?.kind === "reactiveFunction") return true;
     if (binding) return false;
     return (call as { arguments: unknown[] }).arguments.length === 0;
   }
@@ -1136,8 +1498,10 @@ function isGetterCall(
     !callee.computed &&
     t.isIdentifier(callee.property)
   ) {
-    if ((call as { arguments: unknown[] }).arguments.length !== 0) return false;
     const rootPath = getMemberExpressionRootAndPath(callee);
+    // `i18n.t("x")`: a method of a reactive object reads signals, whatever its arguments.
+    if (rootPath && scope.bindings.get(rootPath.root)?.kind === "reactiveObject") return true;
+    if ((call as { arguments: unknown[] }).arguments.length !== 0) return false;
     if (!rootPath) return false;
     const binding = scope.bindings.get(rootPath.root);
     if (
@@ -1147,7 +1511,8 @@ function isGetterCall(
       binding?.kind === "computed" ||
       binding?.kind === "prop" ||
       binding?.kind === "getter" ||
-      binding?.kind === "signalObject"
+      binding?.kind === "signalObject" ||
+      binding?.kind === "reactiveFunction"
     ) {
       return false;
     }
@@ -1182,7 +1547,7 @@ export function isReactiveValue(node: t.Node, scope: ReactiveScope): boolean {
   const rootPath = getMemberExpressionRootAndPath(node);
   if (!rootPath) return false;
   const binding = scope.bindings.get(rootPath.root);
-  if (!binding) {
+  if (!binding || binding.kind === "reactiveObject" || binding.kind === "reactiveFunction") {
     return isSignalValuePath(rootPath.path);
   }
 
@@ -2373,7 +2738,9 @@ function inspectDerivedExpression(
     } else if (path.isMemberExpression() || path.isOptionalMemberExpression()) {
       if (isReactiveRead(node, ctx.scope)) reactive = true;
     } else if (path.isCallExpression() || path.isOptionalCallExpression()) {
-      const getter = inspectLocalGetterCall(path, ctx);
+      const getter = isReactiveImportCall(path.node, ctx.scope)
+        ? { safe: true, reactive: true }
+        : inspectLocalGetterCall(path, ctx);
       if (getter) {
         if (!getter.safe) safe = false;
         if (getter.reactive) reactive = true;
@@ -2448,7 +2815,7 @@ function promoteReactiveConstInitializers(
   options: DerivedLocalOptions,
 ): void {
   if (!options.derivedLocals && !options.dev) return;
-  const names = trackReactiveImports(ast);
+  const names = trackReactiveImports(ast, options);
   const pureImports = collectPureImports(
     ast,
     options.filename,
@@ -2731,7 +3098,7 @@ function wrapLiveReadArguments(
   ast: t.Node,
   options: DerivedLocalOptions,
 ): void {
-  const names = trackReactiveImports(ast);
+  const names = trackReactiveImports(ast, options);
   const imported = new Map<string, number[]>();
   const filename = options.filename ? path.resolve(options.filename) : "";
   traverse(ast, {
@@ -2823,6 +3190,7 @@ export function wrapReactiveExpressions(
   // Collects: reactive imports, component functions, exports, local scopes,
   // call graph, cross-module prop metadata, and existing `unwrap` import.
   // Previously 5-7 separate traverses; now one.
+  const reactiveImports = collectReactiveImports(ast, options.filename, resolveImport);
   const names: ImportNames = {
     createMutable: new Set(),
     createStore: new Set(),
@@ -2831,6 +3199,8 @@ export function wrapReactiveExpressions(
     useState: new Set(),
     useFetch: new Set(),
     cc: new Set(),
+    reactiveObjects: reactiveImports.objects,
+    reactiveFunctions: reactiveImports.functions,
   };
   const componentFunctions = new Set<t.Function>();
   const componentNames = new Map<string, t.Function>();

@@ -2,6 +2,21 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.2.0] — Reactive imports: `sinwan-i18n` and `@sinwan-reactive`
+
+### Added
+
+- **Reactive imports (`reactive-wrap.ts`, `analyze.ts`)**: a JSX call on a value from another module is wrapped in a getter when that module makes it reactive.
+  - **The cause:** before this, only reads the compiled file could see counted, plus zero-argument calls (`api.count()`). `{i18n.t("nav.sales")}`, `title={i18n.t(...)}` and `<Child label={t("x")} />` therefore rendered once, and never followed a locale change.
+  - **What counts as reactive:**
+    - an object made by `createI18n` from `sinwan-i18n`;
+    - functions taken from such an object (`export const { t } = i18n`, `export const t = i18n.t`);
+    - any export annotated `/** @sinwan-reactive */`: on an object or class, member calls are reactive; on a function, direct calls are.
+  - **How modules are read:** like `@sinwan-pure`, imports go through the plugin's resolver (tsconfig `paths`, bunfig aliases). Barrels, `export * as`, default exports and namespace imports are followed, cycles are safe, and results are cached by file time.
+  - **Where it applies:** children, attributes, component props (the analyzer marks the receiving prop reactive), control-flow props and local helpers that call them. A parameter or local with the same name shadows the import.
+  - **Derived locals:** a component-body `const title = i18n.t("x")` counts as a reactive read. It is promoted with `derivedLocals`; with `dev` and without `derivedLocals`, it is reported with the existing snapshot warning when used in JSX.
+- `analyzeModule(code, filePath, resolveImport?)` takes the project resolver, so the analyzer resolves reactive imports through aliases.
+
 ## [1.1.5] — JSX comments no longer shift template slot paths
 
 ### Fixed

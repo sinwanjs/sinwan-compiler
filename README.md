@@ -11,6 +11,15 @@ Use this package directly when you write a plugin, run a production analysis pas
 - **Wraps exported function components** with `cc()` when they look like components.
 - **Analyzes the project** so static props stay static and only truly reactive props pay for an effect.
 
+## Reactive imports
+
+A call in JSX becomes a getter when it reads signals. The compiler sees the reads in the file it compiles. For values made in another module, it reads that module:
+
+- **Known factories.** `export const i18n = createI18n(...)` from `sinwan-i18n` is a reactive object, so `{i18n.t("nav.sales")}`, `title={i18n.money(total, "MAD")}` and `<Child label={i18n.t("x")} />` update when the locale changes. Functions taken from it are reactive too: `export const { t } = i18n` and `export const t = i18n.t`.
+- **`/** @sinwan-reactive */`.** Put it on an exported object, class or function whose calls read signals or stores. Every member call (`presence.isOnline(id)`) or direct call (`label(key)`) is then wrapped, whatever its arguments.
+
+Re-exports, `export * as ns`, default exports, namespace imports and tsconfig `paths` aliases are followed, and results are cached until a file changes. A parameter or local with the same name shadows the import. Calls that run once by design stay eager: at module level, in event handlers, and in a component-body `const`. With `dev: true` the compiler warns about such a `const` when it is used in JSX; with `derivedLocals`, it becomes a getter.
+
 ## Install
 
 ```bash
