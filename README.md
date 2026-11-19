@@ -20,6 +20,20 @@ A call in JSX becomes a getter when it reads signals. The compiler sees the read
 
 Re-exports, `export * as ns`, default exports, namespace imports and tsconfig `paths` aliases are followed, and results are cached until a file changes. A parameter or local with the same name shadows the import. Calls that run once by design stay eager: at module level, in event handlers, and in a component-body `const`. With `dev: true` the compiler warns about such a `const` when it is used in JSX; with `derivedLocals`, it becomes a getter.
 
+## Images (`<Img>`, Bun only)
+
+`transformJSX(code, file, { images: { host: "bun" } })` rewrites static `<Img src>` (from `sinwan/image`) to `?sinwan-img=` asset imports. bun-plugin-sinwan passes `host: "bun"`, and so does vite-plugin-sinwan when Vite runs on Bun. Any `<Img>` compiled for another host throws `BunOnlyImageError`; for Vite on Node, the error says to run `bunx --bun vite`. `sinwan-compiler/image` holds the pipeline, which runs on `Bun.Image` only:
+
+- `resolveImageConfig`, `validateBuildOptions`, `planImage`: configuration, strict prop validation and variant planning (never upscales).
+- `encodeVariant`, `createPlaceholder`, `canEncodeAvif`: encoding and the ThumbHash blur.
+- `ImageCache` / `imageCacheFor`: content-addressed disk cache (`.sinwan/images/`); `prune(maxBytes)`.
+- `loadImageModule`: the asset module behind a `?sinwan-img=` import (bun-plugin-sinwan calls it).
+- `createImageHandler(config)`: `Bun.serve` route for runtime sources, `?url=&w=&q=[&f=]`.
+  - Only configured widths and qualities are accepted.
+  - Local files must be under `publicDir`.
+  - Remote URLs need a `remotePatterns` entry and are fetched without redirects, with `fetchTimeoutMs` and `maxInputBytes`.
+  - The format follows `Accept`; responses carry `Vary`, `ETag` and `Cache-Control: public, max-age=<cacheTTL>`.
+
 ## Install
 
 ```bash

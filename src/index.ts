@@ -10,6 +10,15 @@ export { COMPILER_TEMPLATE_SLOT_PROTOCOL } from "./transform";
 export { autoWrapComponents } from "./auto-cc";
 export { rewriteLiveCcDestructure } from "./live-cc-destructure";
 export {
+  IMAGE_MODULE,
+  ImageTransformError,
+  rewriteImageElements,
+  type ImageHost,
+  type ImageTransformOptions,
+} from "./image/transform-pass";
+export { BUN_ONLY_IMAGE_MESSAGE, BunOnlyImageError } from "./image/runtime-guard";
+export { IMAGE_QUERY_PATTERN } from "./image/query";
+export {
   analyze,
   analyzeProject,
   analyzeModule,

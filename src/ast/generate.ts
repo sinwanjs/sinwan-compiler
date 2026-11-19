@@ -55,18 +55,16 @@ export function generate(
     sourceMapSource: options.sourceFileName,
     sourceMapContent: _code,
   });
-  const map =
-    options.sourceMaps && result.map
-      ? {
-          ...result.map,
-          file: options.sourceFileName,
-          sources: options.sourceFileName
-            ? [options.sourceFileName]
-            : result.map.sources,
-        }
-      : options.sourceMaps
-        ? result.map
-        : null;
+  // esrap always returns a source map (built lazily on access).
+  const map = options.sourceMaps
+    ? {
+        ...result.map,
+        file: options.sourceFileName,
+        sources: options.sourceFileName
+          ? [options.sourceFileName]
+          : result.map.sources,
+      }
+    : null;
   return { code: result.code, map };
 }
 

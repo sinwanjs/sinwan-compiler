@@ -328,9 +328,8 @@ export function autoWrapComponents(ast: t.Node, filename?: string): boolean {
     },
 
     ExportDefaultDeclaration(path: any) {
-      const decl = t.isNode(path.node.declaration)
-        ? t.unwrapParens(path.node.declaration)
-        : path.node.declaration;
+      // An ExportDefaultDeclaration always has a declaration node.
+      const decl = t.unwrapParens(path.node.declaration);
 
       // export default function Foo() {...}
       //   -> function Foo() {...}; export default cc(Foo);  (preserves binding)

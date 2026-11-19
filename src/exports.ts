@@ -114,11 +114,9 @@ export function collectExportedComponents(
       }
     } else if (node.type === "ExportDefaultDeclaration") {
       const raw = node.declaration;
-      const declaration = (
-        raw && typeof raw === "object" && "type" in raw
-          ? t.unwrapParens(raw as t.Node)
-          : raw
-      ) as {
+      // An ExportDefaultDeclaration always has a declaration node.
+      if (!t.isNode(raw)) continue;
+      const declaration = t.unwrapParens(raw) as {
         type: string;
         name?: string;
         id?: unknown;

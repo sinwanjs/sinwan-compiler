@@ -2,6 +2,44 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.3.0] — `<Img>`: Bun-native image optimization
+
+### Added
+
+- **`<Img>` compile pass (`image/transform-pass.ts`, run by `transformJSX`)**: finds `<Img>` imported from `sinwan/image` (aliases included). A static `src` — a string literal (`"./hero.jpg"`, `"/photos/a.jpg"`, `"@/assets/a.png"`) or a default import of an image file — becomes an optimized asset import (`"./hero.jpg?sinwan-img=<options>"`). The optimization props (`width`, `height`, `quality`, `format`, `fit`, `sizes`, `densities`, `placeholder`, `aspectRatio`) must be literals; anything else is a compile error with `file:line:column`. Dynamic `src` is left to the runtime loader.
+- **Bun only**: the new `images.host` option says who runs the image pipeline.
+  - `"bun"` is used by bun-plugin-sinwan and by Vite started on Bun (`bunx --bun vite`).
+  - Any `<Img>` compiled with `"vite"` (Vite on Node), `"other"` or no option throws `BunOnlyImageError` with `BUN_ONLY_IMAGE_MESSAGE`. For Vite, the message says to start it with `bunx --bun vite`.
+  - There is no fallback encoder.
+- **`sinwan-compiler/image`** (new subpath, no parser dependency):
+  - **Encoding**: `Bun.Image` only. `auto` is WebP, so builds are identical on every machine. AVIF is used only where the OS has an encoder; otherwise an explicit `format="avif"` is a build error.
+  - **Variants**: density (`1x`/`2x`) or width (`640w`…) descriptors, never upscaled. `cover`/`contain`/`fill`/`inside`/`outside` are computed as exact pixel sizes; Bun.Image cannot crop, so `cover` is cropped by CSS `object-fit`.
+  - **Placeholders**: `placeholder="blur"` inlines a ThumbHash data URL (about 1–2 KB).
+  - **Disk cache**: content-addressed (`.sinwan/images/`, keyed by source bytes, target, pipeline and Bun version). An unchanged image is never decoded again across builds, dev reloads and requests, and concurrent work is shared. `ImageCache.prune(maxBytes)` evicts the least recently used files.
+  - **`loadImageModule`**: builds the asset module behind a `?sinwan-img=` import. It imports the cached files through `sinwan-img-file:` so the bundler hashes and emits them, and exports an `ImageAsset`.
+  - **`createImageHandler()`**: on-demand optimization for runtime sources, as a `Bun.serve` route (`/_sinwan/image?url=&w=&q=[&f=]`).
+    - Only configured widths and qualities are accepted (400 otherwise).
+    - Local files must be under `publicDir` (403 otherwise).
+    - Remote URLs must match `remotePatterns`, are fetched without following redirects, with a timeout and a byte limit (413).
+    - The format follows `Accept` (AVIF, then WebP, then JPEG/PNG), with `Vary`, `ETag`/304 and `Cache-Control`.
+
+### Changed
+
+- **Internal, no behaviour change**: line coverage is now 100%. Branches that could not run were removed:
+  - `generate`: `esrap` always returns a map.
+  - `parse`: comment-key skips before attaching, the exact-span check, and the `comments` fallback.
+  - The non-node `ExportDefaultDeclaration` arms.
+  - `try/catch` around `fs.existsSync`, which never throws.
+  - The JSX branches of `isReferencedIdentifier` (oxc names JSX with `JSXIdentifier`).
+  - The double `package.json` read for workspace packages.
+- New tests cover the cases that had none:
+  - bunfig aliases, exact tsconfig paths, JSX children of imported components
+  - workspace discovery: `package.json`, `pnpm-workspace.yaml`, globs, `source`
+  - analyzer cache restore, the analyze CLI's output directory
+  - loop, `catch` and `switch` scopes, and the `Path` API's edge cases
+  - static style objects, inline spread props, string-named pure re-exports, a resolver that throws
+- `package.json` has an `exports` map (`.`, `./image`, `./package.json`). The main entry is unchanged.
+
 ## [1.2.0] — Reactive imports: `sinwan-i18n` and `@sinwan-reactive`
 
 ### Added

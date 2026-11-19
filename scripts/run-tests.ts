@@ -16,6 +16,13 @@ const files = [
   "auto-cc.test.ts",
   "tsconfig-paths.test.ts",
   "reactive-imports.test.ts",
+  "image-options-plan.test.ts",
+  "image-pipeline.test.ts",
+  "image-handler.test.ts",
+  "image-transform.test.ts",
+  "ast-paths.test.ts",
+  "transform-edges.test.ts",
+  "analyze-config.test.ts",
 ].map((file) => path.join(testsDir, file));
 
 const result = Bun.spawnSync({

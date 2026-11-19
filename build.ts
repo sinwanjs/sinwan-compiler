@@ -17,7 +17,7 @@ async function emitDeclarations() {
 async function buildBundle() {
   console.log("📦  Bundling with Bun.build");
   await Bun.build({
-    entrypoints: [`${ROOT}/src/index.ts`, `${ROOT}/src/cli.ts`],
+    entrypoints: [`${ROOT}/src/index.ts`, `${ROOT}/src/cli.ts`, `${ROOT}/src/image/index.ts`],
     outdir: DIST,
     root: `${ROOT}/src`,
     target: "bun",

@@ -10,6 +10,7 @@ import { autoWrapComponents } from "./auto-cc";
 import { rewriteLiveCcDestructure } from "./live-cc-destructure";
 import { wrapReactiveExpressions } from "./reactive-wrap";
 import { parse, generate, traverse, t } from "./ast";
+import { rewriteImageElements, type ImageTransformOptions } from "./image/transform-pass";
 
 
 export interface TransformOptions {
@@ -24,6 +25,12 @@ export interface TransformOptions {
   analyze?: string;
   /** In-memory reactive-props metadata (used by plugin-level caches). */
   analyzeMetadata?: Map<string, Map<string, Set<string>>>;
+  /**
+   * `<Img>` from `sinwan/image`: who bundles the output. Static sources are
+   * rewritten to `?sinwan-img=` asset imports when `host` is `"bun"`; any
+   * `<Img>` with another (or no) host throws `BunOnlyImageError`.
+   */
+  images?: ImageTransformOptions;
   /**
    * Resolves an import source (e.g. "./Child") to an absolute file path,
    * relative to the file being transformed. Used to look up reactive-prop
@@ -616,6 +623,9 @@ export function transformJSX(
     plugins: ["jsx", "typescript"],
     sourceFilename: filename,
   });
+
+  // `<Img>`: static sources become optimized asset imports (Bun only).
+  rewriteImageElements(ast, code, filename, options.images);
 
   // Auto-wrap exported component-like functions with `cc(...)` so plain
   // `export function App()` / `export const App = () => <div/>` are treated as

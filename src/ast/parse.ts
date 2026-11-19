@@ -43,13 +43,8 @@ function attachComments(program: Program, comments: OxcComment[]): void {
     if (typeof node.start === "number" && typeof node.end === "number") {
       nodes.push(node);
     }
+    // oxc nodes carry no comment keys yet; this runs once, before attaching.
     for (const key of Object.keys(node)) {
-      if (
-        key === "leadingComments" ||
-        key === "trailingComments" ||
-        key === "innerComments"
-      )
-        continue;
       const val = node[key];
       if (Array.isArray(val)) {
         for (const item of val) {
@@ -88,12 +83,9 @@ function attachComments(program: Program, comments: OxcComment[]): void {
       }
     }
 
-    const commentIsNode =
-      container != null &&
-      (container.type === "JSXEmptyExpression" ||
-        ((container.start ?? -1) === comment.start &&
-          (container.end ?? -1) === comment.end));
-    if (commentIsNode && container) {
+    // `{/* note */}`: the comment is the whole JSX expression. No other oxc
+    // node can span exactly a comment.
+    if (container?.type === "JSXEmptyExpression") {
       const list = (container.leadingComments ??= []) as Comment[];
       list.push(mapped);
       continue;
@@ -171,8 +163,7 @@ export function parse(code: string, options: ParseOptions = {}): File {
   }
 
   const program = asProgram(result.program);
-  const comments = ((result as { comments?: OxcComment[] }).comments ??
-    []) as OxcComment[];
+  const comments: OxcComment[] = result.comments;
   attachComments(program, comments);
 
   return {

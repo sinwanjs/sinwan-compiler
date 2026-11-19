@@ -472,9 +472,8 @@ export function analyzeModule(
       if (source) reExports.push({ exported: "*", source, imported: "*" });
     },
     ExportDefaultDeclaration(path: any) {
-      const decl = t.isNode(path.node.declaration)
-        ? t.unwrapParens(path.node.declaration)
-        : path.node.declaration;
+      // An ExportDefaultDeclaration always has a declaration node.
+      const decl = t.unwrapParens(path.node.declaration);
       if (t.isIdentifier(decl)) {
         const fn = componentNames.get(decl.name);
         if (fn) defaultExport = fn;
@@ -694,12 +693,15 @@ function resolveWithExtensions(
   return null;
 }
 
-function readPackageName(pkgDir: string): string | null {
+interface WorkspacePackageJson {
+  name?: string;
+  source?: string;
+}
+
+/** A workspace package's `package.json`, or `null` when missing or invalid. */
+function readPackageJson(pkgDir: string): WorkspacePackageJson | null {
   try {
-    const pkgJson = JSON.parse(
-      fs.readFileSync(path.join(pkgDir, "package.json"), "utf-8"),
-    ) as { name?: string };
-    return pkgJson.name ?? null;
+    return JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf-8")) as WorkspacePackageJson;
   } catch {
     return null;
   }
@@ -713,35 +715,24 @@ function resolveWorkspacePackage(
   if (packages.length === 0) return null;
   if (source.startsWith(".") || source.startsWith("/")) return null;
 
-  let matchedPkg: string | null = null;
-  let matchedName: string | null = null;
+  let matched: { dir: string; name: string; json: WorkspacePackageJson } | null = null;
   for (const pkg of packages) {
-    const pkgName = readPackageName(pkg);
-    if (!pkgName) continue;
+    const json = readPackageJson(pkg);
+    const pkgName = json?.name;
+    if (!json || !pkgName) continue;
     if (source === pkgName || source.startsWith(pkgName + "/")) {
-      if (!matchedName || pkgName.length > matchedName.length) {
-        matchedName = pkgName;
-        matchedPkg = pkg;
+      if (!matched || pkgName.length > matched.name.length) {
+        matched = { dir: pkg, name: pkgName, json };
       }
     }
   }
-  if (!matchedPkg || !matchedName) return null;
+  if (!matched) return null;
 
-  const subpath = source.slice(matchedName.length + 1);
-  let sourceDir: string;
-  try {
-    const pkgJson = JSON.parse(
-      fs.readFileSync(path.join(matchedPkg, "package.json"), "utf-8"),
-    ) as { source?: string; main?: string; module?: string };
-    if (pkgJson.source) {
-      sourceDir = path.dirname(path.resolve(matchedPkg, pkgJson.source));
-    } else {
-      sourceDir = path.join(matchedPkg, "src");
-    }
-  } catch {
-    sourceDir = path.join(matchedPkg, "src");
-  }
-
+  const subpath = source.slice(matched.name.length + 1);
+  // `source` points at the package's entry file; without it, sources live in `src/`.
+  const sourceDir = matched.json.source
+    ? path.dirname(path.resolve(matched.dir, matched.json.source))
+    : path.join(matched.dir, "src");
   const targetBase = subpath
     ? path.join(sourceDir, subpath)
     : path.join(sourceDir, "index");

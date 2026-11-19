@@ -211,8 +211,9 @@ function seedScopeBindings(scope: Scope): void {
   if (node.type === "SwitchStatement") {
     const cases = (node.cases as Node[]) ?? [];
     for (let i = 0; i < cases.length; i++) {
-      const consequent = ((cases[i] as { consequent?: Node[] }).consequent ??
-        []) as Node[];
+      // ESTree: a SwitchCase's `consequent` is always a statement list.
+      const consequent = cases[i]!.consequent;
+      if (!Array.isArray(consequent)) continue;
       const casePath = singlePath(path.get(`cases.${i}`));
       for (let j = 0; j < consequent.length; j++) {
         const stmt = consequent[j]!;
@@ -700,15 +701,8 @@ export class Path {
       return true;
     }
     if (parent.type === "CatchClause" && this.key === "param") return false;
-    if (parent.type === "JSXAttribute" && this.key === "name") return false;
-    if (
-      (parent.type === "JSXOpeningElement" ||
-        parent.type === "JSXClosingElement") &&
-      this.key === "name"
-    )
-      return false;
-    if (parent.type === "JSXMemberExpression" && this.key === "property")
-      return false;
+    // JSX tag, attribute and member names are `JSXIdentifier` in oxc's
+    // ESTree, never `Identifier`, so they are already excluded above.
     return true;
   }
 

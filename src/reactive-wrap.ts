@@ -255,26 +255,20 @@ const PURE_EXTENSIONS = [
 
 function tryResolveFile(base: string): string | null {
   // If the path already has a recognized extension, check it directly.
+  // `fs.existsSync` never throws (it returns false on any error).
   if (PURE_EXTENSIONS.some((ext) => base.endsWith(ext))) {
-    try {
-      if (fs.existsSync(base)) return base;
-    } catch {}
-    return null;
+    return fs.existsSync(base) ? base : null;
   }
   for (const ext of PURE_EXTENSIONS) {
-    try {
-      if (fs.existsSync(base + ext)) return base + ext;
-    } catch {}
+    if (fs.existsSync(base + ext)) return base + ext;
   }
   return null;
 }
 
 function tryResolveIndex(dir: string): string | null {
   for (const ext of PURE_EXTENSIONS) {
-    try {
-      const candidate = path.join(dir, "index") + ext;
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {}
+    const candidate = path.join(dir, "index") + ext;
+    if (fs.existsSync(candidate)) return candidate;
   }
   return null;
 }
@@ -1399,9 +1393,8 @@ function getMemberExpressionRootAndPath(
       continue;
     }
     if (isMemberLike(current)) {
-      const member = t.isChainExpression(current)
-        ? t.unwrapChain(current)
-        : current;
+      // Chains were unwrapped above, so `current` is the member itself.
+      const member = current;
       if ((member as { computed?: boolean }).computed) return null;
       const property = (member as { property: t.Node }).property;
       if (!t.isIdentifier(property)) return null;
@@ -2862,9 +2855,9 @@ function promoteReactiveConstInitializers(
       trackLocalScopeBindings(fnPath, names, scope, true);
       const derived = new Map<AstBinding, DerivedLocal>();
       const statements = body.get("body");
-      for (const statement of Array.isArray(statements)
-        ? statements
-        : [statements]) {
+      // A block body is always a statement list.
+      if (!Array.isArray(statements)) return;
+      for (const statement of statements) {
         if (
           !statement.isVariableDeclaration({ kind: "const" }) ||
           hasSnapshotPragma(statement.node)
