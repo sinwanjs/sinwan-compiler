@@ -2,6 +2,14 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.5.0] — Diagnostics for list and Dynamic pitfalls
+
+### Added
+
+- **SW104, an `Index` item used as a value**: `<Index>` passes each item as a getter. `{(item) => item.name}` reads `Function.name` (TypeScript accepts it) and `{item + 1}` or `` `#${item}` `` stringify the function. Property reads, operands, template parts, truthiness tests (`item && …`, `!item`) and destructuring the parameter are reported; calls, plain `{item}` uses, `typeof`, and nested functions that rebind the name are not.
+- **SW105, list children that are not a render function**: `<For>`, `<Index>` and `<Virtual>` call their children once per item, so a JSX element, text, string or template child is reported. Function references (`{renderRow}`) and whitespace are not.
+- **SW106, an inline zero-argument `Dynamic` component**: `<Dynamic component={() => <Row />}>` is read as a getter and called, so `Dynamic` receives an element instead of a component and renders nothing. Components (`cc(...)`, `(props) => …`) and reactive choices (`pick.value ? A : B`) are not reported.
+
 ## [1.4.0] — Diagnostics for silent JSX pitfalls
 
 ### Added

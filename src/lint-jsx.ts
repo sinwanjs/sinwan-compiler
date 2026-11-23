@@ -191,6 +191,17 @@ function lintOpeningElement(
         );
       }
     } else if (
+      builtin === "Dynamic" &&
+      name === "component" &&
+      isZeroArgumentFunction(expression)
+    ) {
+      report(
+        "SW106",
+        expression.start,
+        `<${label} component={() => …}>: a zero-argument function is read as a getter and called, so Dynamic receives its result instead of a component and renders nothing.`,
+        "Pass a component defined once (component={Row}, where Row = cc(...)), or give the function a props parameter.",
+      );
+    } else if (
       name === "when" &&
       IDENTITY_WHEN.has(builtin) &&
       createsFreshObject(expression)
@@ -202,6 +213,142 @@ function lintOpeningElement(
         "Pass a boolean (when={!!x}) and read the value in the children, or keep the object stable with computed().",
       );
     }
+  }
+}
+
+/** Built-ins that call their children once per item. */
+const LIST_BUILTINS = new Set(["For", "Index", "Virtual"]);
+
+function isFunctionNode(node: Node): boolean {
+  return t.isArrowFunctionExpression(node) || t.isFunctionExpression(node);
+}
+
+/** A child that can never be a render function (JSX, text, string literals). */
+function isStaticChild(child: Node): boolean {
+  if (child.type === "JSXText") {
+    return typeof child.value === "string" && child.value.trim() !== "";
+  }
+  if (child.type === "JSXElement" || child.type === "JSXFragment") return true;
+  if (!t.isJSXExpressionContainer(child)) return false;
+  const expression = unwrapExpression(child.expression);
+  return (
+    expression.type === "JSXElement" ||
+    expression.type === "JSXFragment" ||
+    expression.type === "TemplateLiteral" ||
+    (expression.type === "Literal" && typeof expression.value === "string")
+  );
+}
+
+function renderFunction(children: Node[]): Node | null {
+  for (const child of children) {
+    if (!t.isJSXExpressionContainer(child)) continue;
+    const expression = unwrapExpression(child.expression);
+    if (isFunctionNode(expression)) return expression;
+  }
+  return null;
+}
+
+function bindsName(fn: Node, name: string): boolean {
+  return (fn.params ?? []).some(
+    (param) => t.isIdentifier(param) && param.name === name,
+  );
+}
+
+function isName(node: Node | null | undefined, name: string): boolean {
+  return t.isIdentifier(node) && node.name === name;
+}
+
+/**
+ * First use of an `Index` item getter as if it were the item: a property
+ * read, an operand, a template part or a truthiness test. Nested functions
+ * that rebind the name are skipped.
+ */
+function findGetterMisuse(node: Node, name: string): Node | null {
+  if (
+    (node.type === "MemberExpression" && isName(node.object, name)) ||
+    ((node.type === "BinaryExpression" || node.type === "LogicalExpression") &&
+      (isName(node.left, name) || isName(node.right, name))) ||
+    (node.type === "UnaryExpression" &&
+      node.operator !== "typeof" &&
+      isName(node.argument, name))
+  ) {
+    return node;
+  }
+  if (
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.expressions) &&
+    node.expressions.some((expression) => isName(expression, name))
+  ) {
+    return node;
+  }
+  for (const key in node) {
+    if (key === "leadingComments" || key === "trailingComments") continue;
+    const value = (node as Record<string, unknown>)[key];
+    const children = Array.isArray(value) ? value : [value];
+    for (const child of children) {
+      if (!t.isNode(child)) continue;
+      if (
+        (isFunctionNode(child) || child.type === "FunctionDeclaration") &&
+        bindsName(child, name)
+      ) {
+        continue;
+      }
+      const found = findGetterMisuse(child, name);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function lintIndexChild(fn: Node, report: Reporter): void {
+  const item = fn.params?.[0];
+  if (!item) return;
+  if (item.type === "ObjectPattern" || item.type === "ArrayPattern") {
+    report(
+      "SW104",
+      item.start,
+      "<Index> passes each item as a getter, so destructuring it reads properties of the function, not of the item.",
+      "Take the getter and call it: (item) => item().name. Use <For> to receive the item value directly.",
+    );
+    return;
+  }
+  if (!t.isIdentifier(item) || !t.isNode(fn.body)) return;
+  const misuse = findGetterMisuse(fn.body, item.name);
+  if (misuse) {
+    report(
+      "SW104",
+      misuse.start,
+      `<Index> passes each item as a getter: this uses ${item.name} itself, not the item it returns.`,
+      `Call it: ${item.name}(). Use <For> to receive the item value directly.`,
+    );
+  }
+}
+
+function lintElement(
+  element: Node,
+  controlFlow: Map<string, string>,
+  report: Reporter,
+): void {
+  const opening = element.openingElement;
+  if (!t.isJSXOpeningElement(opening) || !t.isJSXIdentifier(opening.name)) {
+    return;
+  }
+  const builtin = controlFlow.get(opening.name.name);
+  if (builtin === undefined || !LIST_BUILTINS.has(builtin)) return;
+  const children = Array.isArray(element.children) ? element.children : [];
+  const staticChild = children.find(isStaticChild);
+  if (staticChild) {
+    report(
+      "SW105",
+      staticChild.start,
+      `<${builtin}> children must be a render function called for each item; this child is not one.`,
+      `Wrap it: {(item) => <Row item={item} />}.`,
+    );
+    return;
+  }
+  if (builtin === "Index") {
+    const fn = renderFunction(children);
+    if (fn) lintIndexChild(fn, report);
   }
 }
 
@@ -220,12 +367,14 @@ function walk(node: Node, visit: (node: Node) => void): void {
   }
 }
 
-/** Report SW101–SW103 for one parsed file. */
+/** Report SW101–SW106 for one parsed file. */
 export function lintJsx(program: Node, report: Reporter): void {
   const controlFlow = collectControlFlowImports(program);
   walk(program, (node) => {
     if (t.isJSXOpeningElement(node)) {
       lintOpeningElement(node, controlFlow, report);
+    } else if (node.type === "JSXElement") {
+      lintElement(node, controlFlow, report);
     }
   });
 }

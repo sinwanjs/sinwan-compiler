@@ -258,3 +258,100 @@ describe("diagnostic helpers", () => {
     expect(isCallbackPropName("online")).toBe(false);
   });
 });
+
+const listHeader = `import { cc, For, Index, Dynamic } from "sinwan";
+import { Virtual } from "sinwan/control-flow";
+import { Row } from "./row";
+`;
+
+function listCodes(code: string): string[] {
+  return codes(listHeader + code);
+}
+
+describe("SW104 Index item getters", () => {
+  it("reports property reads, operands, templates and truthiness tests", () => {
+    expect(
+      listCodes(`export const A = cc(() => <div>
+  <Index each={rows}>{(item) => <p>{item.name}</p>}</Index>
+  <Index each={rows}>{(item) => <p>{item + 1}</p>}</Index>
+  <Index each={rows}>{(item) => <p>{\`#\${item}\`}</p>}</Index>
+  <Index each={rows}>{(item) => <p>{item && "x"}</p>}</Index>
+  <Index each={rows}>{(item) => <p>{!item}</p>}</Index>
+  <Index each={rows}>{({ name }) => <p>{name}</p>}</Index>
+  <Index each={rows}>{function (item) { return <p>{item.id}</p>; }}</Index>
+</div>);`),
+    ).toEqual(["SW104", "SW104", "SW104", "SW104", "SW104", "SW104", "SW104"]);
+  });
+
+  it("points at the misuse and names the getter", () => {
+    const found = diagnose(`${listHeader}export const A = cc(() => (
+  <Index each={rows}>{(row) => <p>{row.name}</p>}</Index>
+));`);
+    expect(found[0]).toMatchObject({ code: "SW104", line: 5, column: 36 });
+    expect(found[0]!.message).toContain("this uses row itself");
+    expect(found[0]!.hint).toContain("row()");
+  });
+
+  it("accepts calls, plain uses, typeof, shadowing and For values", () => {
+    expect(
+      listCodes(`export const A = cc(() => <div>
+  <Index each={rows}>{(item) => <p>{item().name}{item}<Row get={item} /></p>}</Index>
+  <Index each={rows}>{(item) => <p>{typeof item}{[1].map((item) => item.x)}</p>}</Index>
+  <Index each={rows}>{(item) => { function f(item) { return item.x; } return <p>{f(1)}</p>; }}</Index>
+  <Index each={rows}>{() => <p>none</p>}</Index>
+  <Index each={rows}>{(item = fallback) => <p>{item}</p>}</Index>
+  <Index each={rows}>{render}</Index>
+  <For each={rows}>{(item) => <p>{item.name}</p>}</For>
+</div>);`),
+    ).toEqual([]);
+  });
+});
+
+describe("SW105 list children that are not render functions", () => {
+  it("reports JSX, text and string children of For, Index and Virtual", () => {
+    expect(
+      listCodes(`export const A = cc(() => <div>
+  <For each={rows}><Row /></For>
+  <Index each={rows}>{<Row />}</Index>
+  <Virtual each={rows} itemHeight={20} containerHeight={200}>row</Virtual>
+  <For each={rows}>{"row"}</For>
+  <For each={rows}>{\`row\`}</For>
+  <For each={rows}><>x</></For>
+</div>);`),
+    ).toEqual(["SW105", "SW105", "SW105", "SW105", "SW105", "SW105"]);
+  });
+
+  it("accepts render functions, references and whitespace", () => {
+    expect(
+      listCodes(`export const A = cc(() => <div>
+  <For each={rows}>
+    {(item) => <Row item={item} />}
+  </For>
+  <For each={rows}>{renderRow}</For>
+  <For each={rows}>{/* empty */}</For>
+  <Row><b>not a list</b></Row>
+</div>);`),
+    ).toEqual([]);
+  });
+});
+
+describe("SW106 inline zero-argument Dynamic components", () => {
+  it("reports a zero-argument arrow or function", () => {
+    expect(
+      listCodes(`export const A = cc(() => <div>
+  <Dynamic component={() => <b />} />
+  <Dynamic component={function () { return <b />; }} />
+</div>);`),
+    ).toEqual(["SW106", "SW106"]);
+  });
+
+  it("accepts components, props parameters and other props", () => {
+    expect(
+      listCodes(`export const A = cc(() => <div>
+  <Dynamic component={Row} />
+  <Dynamic component={(props) => <b title={props.t} />} />
+  <Dynamic component={pick.value ? Row : "span"} title={() => 1} />
+</div>);`),
+    ).toEqual([]);
+  });
+});
