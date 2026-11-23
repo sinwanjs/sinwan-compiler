@@ -2,6 +2,25 @@
 
 All notable changes to **sinwan-compiler** are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com) and sinwan-compiler adheres to [Semantic Versioning](https://semver.org).
 
+## [1.4.0] — Diagnostics for silent JSX pitfalls
+
+### Added
+
+- **Compiler diagnostics (`diagnostics.ts`, `lint-jsx.ts`)**: JSX that compiles but misbehaves at runtime is reported with a stable code, `file:line:column` and a hint. The new rules run with `dev`, on the source as written, before any other pass:
+  - **SW101**: a zero-argument arrow or function on a component prop (`<Gate content={() => …}>`). Sinwan reads it as a getter, so the component receives the return value, not the function; an `action={async () => save()}` would even run while the prop is read. Callback names (`on…`, DOM events; the same rule as the runtime), `children`, `ref`, intrinsic elements and built-in control flow are skipped.
+  - **SW102**: `when` on `Show`, `Match` or `Key` (imported from `sinwan`, `sinwan/control-flow` or `sinwan/react`, aliases included) that builds a new object or array: a literal, `new`, or one in a `?:` / `&&` branch. Identity changes on every evaluation, so the content is rebuilt whenever anything the expression reads changes.
+  - **SW103**: `value`, `checked` or `open` set to `undefined` (or `void 0`) on a component. The prop is present, so a controlled component ignores input.
+- **`onDiagnostic` option** on `transformJSX`: receives each `SinwanDiagnostic` (`code`, `message`, `hint`, `file`, `line`, `column`). Without it, diagnostics print with `console.warn` as before. `formatDiagnostic` and the diagnostic types are exported.
+- **`sinwan-ignore` comments**: `/* sinwan-ignore SW101 */` (or `// sinwan-ignore SW101`) on the reported line or the line above silences that code; `sinwan-ignore` alone silences all.
+
+### Changed
+
+- The existing warnings use the same channel and now carry a code and a real location. Before, the location was `file:0`, because oxc nodes have offsets, not `loc`. Their text is unchanged after the `[Sinwan] file:line:column CODE:` prefix:
+  - **SW110**: a derived local snapshots a reactive read used in JSX.
+  - **SW111**: a derived local in a setup `if` is read once.
+  - **SW112**: template hoisting was skipped (dev).
+  - **SW113**: `${…}` in a quoted `style` string.
+
 ## [1.3.0] — `<Img>`: Bun-native image optimization
 
 ### Added

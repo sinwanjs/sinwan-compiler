@@ -11,6 +11,13 @@ import { rewriteLiveCcDestructure } from "./live-cc-destructure";
 import { wrapReactiveExpressions } from "./reactive-wrap";
 import { parse, generate, traverse, t } from "./ast";
 import { rewriteImageElements, type ImageTransformOptions } from "./image/transform-pass";
+import { lintJsx } from "./lint-jsx";
+import {
+  createReporter,
+  warnDiagnostic,
+  type DiagnosticHandler,
+  type Reporter,
+} from "./diagnostics";
 
 
 export interface TransformOptions {
@@ -39,6 +46,11 @@ export interface TransformOptions {
    * identifiers stay unwrapped.
    */
   resolveImport?: (source: string, fromFile: string) => string | null;
+  /**
+   * Receives compiler diagnostics (`SW1xx`): JSX that compiles but misbehaves
+   * at runtime. The lint rules run only with `dev`. Default: `console.warn`.
+   */
+  onDiagnostic?: DiagnosticHandler;
 }
 
 interface TemplateSlot {
@@ -227,26 +239,24 @@ function elementNeedsJsxEnhancer(node: t.JSXElement): boolean {
   }
 }
 
-function extractTemplate(node: any, filename: string): ExtractedTemplate {
+function extractTemplate(node: any, report: Reporter): ExtractedTemplate {
   const counter: SlotCounter = { value: 0 };
   const slots: TemplateSlot[] = [];
-  const html = elementToHtml(node, slots, [], filename, counter);
+  const html = elementToHtml(node, slots, [], report, counter);
   return { html, slots };
 }
 
 function warnSuspectedStyleInterpolation(
   attrValue: string,
-  filename: string,
-  line?: number | null,
+  report: Reporter,
+  offset: number | null | undefined,
 ): void {
   if (!attrValue.includes("${")) return;
-  const location = line ? `:${line}` : "";
-  console.warn(
-    '[Sinwan] JSX string literal style attribute contains "${...}" which will not be interpolated. ' +
-      "Use style={`...${...}`} instead. (" +
-      filename +
-      location +
-      ")",
+  report(
+    "SW113",
+    offset,
+    'JSX string literal style attribute contains "${...}" which will not be interpolated.',
+    "Use style={`...${...}`} instead.",
   );
 }
 
@@ -312,7 +322,7 @@ function elementToHtml(
   node: any,
   slots: TemplateSlot[],
   path: number[],
-  filename: string,
+  report: Reporter,
   counter: SlotCounter,
 ): string {
   const opening = node.openingElement;
@@ -385,11 +395,7 @@ function elementToHtml(
     ) {
       const rawValue = attr.value.value;
       if (attrName === "style") {
-        warnSuspectedStyleInterpolation(
-          rawValue,
-          filename,
-          attr.value.loc?.start?.line,
-        );
+        warnSuspectedStyleInterpolation(rawValue, report, attr.value.start);
       }
       if (tagName === "textarea" && attrName === "defaultValue") {
         textareaDefault = escapeHtml(rawValue);
@@ -408,7 +414,7 @@ function elementToHtml(
     node.children,
     slots,
     path,
-    filename,
+    report,
     0,
     counter,
   );
@@ -459,7 +465,7 @@ function childrenToHtml(
   children: any[],
   slots: TemplateSlot[],
   path: number[],
-  filename: string,
+  report: Reporter,
   startIndex: number,
   counter: SlotCounter,
   allowParentFill = true,
@@ -540,7 +546,7 @@ function childrenToHtml(
           child,
           slots,
           [...path, childIndex],
-          filename,
+          report,
           counter,
         );
         childIndex++;
@@ -550,7 +556,7 @@ function childrenToHtml(
         child.children,
         slots,
         path,
-        filename,
+        report,
         childIndex,
         counter,
         false,
@@ -623,6 +629,12 @@ export function transformJSX(
     plugins: ["jsx", "typescript"],
     sourceFilename: filename,
   });
+  const report = createReporter(
+    code,
+    filename,
+    options.onDiagnostic ?? warnDiagnostic,
+  );
+  if (options.dev) lintJsx(ast.program, report);
 
   // `<Img>`: static sources become optimized asset imports (Bun only).
   rewriteImageElements(ast, code, filename, options.images);
@@ -645,6 +657,7 @@ export function transformJSX(
     analyzeMetadata: options.analyzeMetadata,
     resolveImport: options.resolveImport,
     filename,
+    report,
   });
 
   const hoist = options.hoist !== false;
@@ -668,7 +681,7 @@ export function transformJSX(
       if (elementNeedsJsxEnhancer(path.node)) return;
 
       try {
-        const extracted = extractTemplate(path.node, filename);
+        const extracted = extractTemplate(path.node, report);
         const tmplId = `_$tmpl_${templateCounter++}`;
         templates.push({ id: tmplId, template: extracted });
 
@@ -695,8 +708,11 @@ export function transformJSX(
         // bugs also land here and would be silently indistinguishable. In dev
         // mode, surface the reason so regressions are debuggable.
         if (options.dev) {
-          console.warn(
-            `[Sinwan] template hoisting skipped in ${filename}: ${(err as Error).message}`,
+          report(
+            "SW112",
+            path.node.start,
+            `template hoisting skipped: ${(err as Error).message}`,
+            "The element still renders, without a hoisted template. Report it if the construct should be supported.",
           );
         }
       }

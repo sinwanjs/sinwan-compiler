@@ -23,6 +23,7 @@ const files = [
   "ast-paths.test.ts",
   "transform-edges.test.ts",
   "analyze-config.test.ts",
+  "diagnostics.test.ts",
 ].map((file) => path.join(testsDir, file));
 
 const result = Bun.spawnSync({

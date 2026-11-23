@@ -34,6 +34,11 @@ import { parse } from "./ast/parse";
 import * as fs from "fs";
 
 import { loadMetadata } from "./analyze";
+import {
+  createReporter,
+  warnDiagnostic,
+  type Reporter,
+} from "./diagnostics";
 
 // ─── Reactive source import tracking ───────────────────────
 
@@ -2283,6 +2288,8 @@ interface DerivedLocalOptions {
   derivedLocals?: boolean;
   dev?: boolean;
   filename?: string;
+  /** Diagnostic sink; `transformJSX` passes one bound to the source text. */
+  report?: Reporter;
   resolveImport?: (source: string, fromFile: string) => string | null;
 }
 
@@ -2808,6 +2815,9 @@ function promoteReactiveConstInitializers(
   options: DerivedLocalOptions,
 ): void {
   if (!options.derivedLocals && !options.dev) return;
+  const report =
+    options.report ??
+    createReporter("", options.filename ?? "<module>", warnDiagnostic);
   const names = trackReactiveImports(ast, options);
   const pureImports = collectPureImports(
     ast,
@@ -2898,15 +2908,17 @@ function promoteReactiveConstInitializers(
       for (const { declaration, binding } of derived.values()) {
         const { id, init } = declaration.node;
         if (!t.isIdentifier(id) || !t.isExpression(init)) continue;
-        const location = `${options.filename ?? "<module>"}:${id.loc?.start.line ?? 0}`;
         if (!options.derivedLocals) {
           if (
             binding.referencePaths.some((ref) =>
               ref.findParent((p) => p.isJSXExpressionContainer()),
             )
           ) {
-            console.warn(
-              `[Sinwan] ${location}: derived local "${id.name}" snapshots a reactive read used in JSX. Enable derivedLocals or use a getter/computed; use /* sinwan-snapshot */ for an intentional snapshot.`,
+            report(
+              "SW110",
+              id.start,
+              `derived local "${id.name}" snapshots a reactive read used in JSX.`,
+              "Enable derivedLocals or use a getter/computed; use /* sinwan-snapshot */ for an intentional snapshot.",
             );
           }
           continue;
@@ -2925,8 +2937,11 @@ function promoteReactiveConstInitializers(
             ref.key === "test" &&
             ref.getFunctionParent()?.node === fnPath.node
           ) {
-            console.warn(
-              `[Sinwan] ${location}: derived local "${id.name}" in a setup if is read once, not a reactive branch. The compiler calls its getter to preserve boolean semantics; use Show for reactive control flow.`,
+            report(
+              "SW111",
+              ref.node.start,
+              `derived local "${id.name}" in a setup if is read once, not a reactive branch.`,
+              "The compiler calls its getter to preserve boolean semantics; use Show for reactive control flow.",
             );
           }
           if (ref.parentPath?.isObjectProperty({ shorthand: true })) {
@@ -3158,6 +3173,7 @@ export function wrapReactiveExpressions(
     analyzeMetadata?: Map<string, Map<string, Set<string>>>;
     resolveImport?: (source: string, fromFile: string) => string | null;
     filename?: string;
+    report?: Reporter;
   } = {},
 ): void {
   promoteReactiveConstInitializers(ast, options);
